@@ -75,11 +75,14 @@ public enum CodexPathResolver {
         if let configValue = parsedConfig.rootValues["sqlite_home"], !configValue.isEmpty {
             return expandTilde(configValue).standardizedFileURL
         }
-        let nestedSQLiteHome = settings.codexHome.appendingPathComponent("sqlite").standardizedFileURL
-        if containsStateDatabase(nestedSQLiteHome) {
-            return nestedSQLiteHome
-        }
-        return settings.codexHome.standardizedFileURL
+        let root = settings.codexHome.standardizedFileURL
+        let nested = root.appendingPathComponent("sqlite").standardizedFileURL
+        return [root, nested]
+            .compactMap { directory -> (URL, Date)? in
+                guard let activity = latestStateDatabaseActivity(in: directory) else { return nil }
+                return (directory, activity)
+            }
+            .max { $0.1 < $1.1 }?.0 ?? root
     }
 
     static func expandTilde(_ path: String) -> URL {
@@ -87,10 +90,26 @@ public enum CodexPathResolver {
         return URL(fileURLWithPath: expanded)
     }
 
-    private static func containsStateDatabase(_ url: URL) -> Bool {
-        guard let files = try? FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: nil) else {
-            return false
+    static func stateDatabaseActivityDate(_ url: URL) -> Date {
+        let fm = FileManager.default
+        return [url, URL(fileURLWithPath: url.path + "-wal"), URL(fileURLWithPath: url.path + "-shm")]
+            .compactMap { candidate in
+                guard let attributes = try? fm.attributesOfItem(atPath: candidate.path),
+                      let date = attributes[.modificationDate] as? Date else {
+                    return nil
+                }
+                return date
+            }
+            .max() ?? .distantPast
+    }
+
+    private static func latestStateDatabaseActivity(in directory: URL) -> Date? {
+        guard let files = try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) else {
+            return nil
         }
-        return files.contains { $0.lastPathComponent.hasPrefix("state_") && $0.pathExtension == "sqlite" }
+        return files
+            .filter { $0.lastPathComponent.hasPrefix("state_") && $0.pathExtension == "sqlite" }
+            .map(stateDatabaseActivityDate)
+            .max()
     }
 }

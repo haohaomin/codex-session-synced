@@ -4,7 +4,7 @@
 
 Codex Synced 是一个 Windows / macOS 本地修复工具，用来解决 Codex Desktop 侧边栏会话历史不可见、标题显示为“新对话”、时间排序异常等本地状态问题。
 
-它会预览需要修复的本地记录，并在备份后修复 SQLite 摘要、`session_index.jsonl`、rollout 文件 mtime 和 `.codex-global-state.json` 中影响侧边栏显示的字段。Provider 只在 rollout metadata 明确证明 SQLite 记录不一致时按 rollout 回写，不再把所有历史强行改成当前 Provider。
+它会预览需要修复的本地记录，并在备份后修复 SQLite 摘要、`session_index.jsonl`、rollout 文件 mtime 和 `.codex-global-state.json` 中影响侧边栏显示的字段。默认会把可恢复的普通会话（包括归档会话）及其 rollout metadata 对齐到当前根级 `model_provider`，解决切换官方或第三方 Provider 后历史被过滤的问题；也可以在设置中关闭跨 Provider 对齐，改为仅按 rollout 修正 SQLite。
 
 它不是云同步工具，也不会上传你的会话。所有扫描、备份、修复都发生在本机。
 
@@ -12,17 +12,17 @@ Codex Synced 是一个 Windows / macOS 本地修复工具，用来解决 Codex D
 
 ## Windows 下载与使用
 
-1. 前往 [GitHub Releases](https://github.com/saymyzj/codex-session-synced/releases/latest) 下载 `Codex-Synced-Windows-x64-1.2.7.msi`。
+1. 前往 [GitHub Releases](https://github.com/renhao12356578/codex-session-synced/releases/latest) 下载 `Codex-Synced-Windows-x64-1.3.0.msi`。
 2. 退出 Codex。
 3. 双击 MSI 完成安装，然后从开始菜单打开 `Codex Synced`。
 4. 查看待修复项，选择备份模式，点击“备份并修复”。
 5. 重新打开 Codex，检查历史会话。
 
-Windows 版是完整桌面应用安装包，默认读取 `%USERPROFILE%\.codex`，并会自动识别其中的 `sqlite` 状态库目录；也可以在设置中修改目录。Release 中也提供 `Codex-Synced-Windows-x64-1.2.7.zip`，用于不想安装时手动运行应用目录。
+Windows 版是完整桌面应用安装包，默认读取 `%USERPROFILE%\.codex`，并会自动识别当前活跃的状态库目录；也可以在设置中修改目录。Release 中也提供 `Codex-Synced-Windows-x64-1.3.0.zip`，用于不想安装时手动运行应用目录。
 
 ## macOS 下载与安装
 
-1. 前往 [GitHub Releases](https://github.com/saymyzj/codex-session-synced/releases/latest) 下载 `Codex-Synced-macOS-1.2.7.dmg`。
+1. 前往 [GitHub Releases](https://github.com/renhao12356578/codex-session-synced/releases/latest) 下载 `Codex-Synced-macOS-1.3.0.dmg`。
 2. 双击打开 DMG。
 3. 将 `Codex Synced.app` 拖入 `Applications`。
 4. 第一次打开时，如果 macOS 提示来自未验证开发者，请在 Finder 中右键点击应用，选择“打开”，再确认打开。
@@ -34,11 +34,11 @@ Windows 版是完整桌面应用安装包，默认读取 `%USERPROFILE%\.codex`�
 
 建议按下面顺序处理：
 
-1. 确认 DMG 来自本项目的 [GitHub Releases](https://github.com/saymyzj/codex-session-synced/releases)。
+1. 确认 DMG 来自本项目的 [GitHub Releases](https://github.com/renhao12356578/codex-session-synced/releases)。
 2. 可选：校验下载文件的 SHA256，应与 Release 页面一致：
 
 ```bash
-shasum -a 256 ~/Downloads/Codex-Synced-macOS-1.2.7.dmg
+shasum -a 256 ~/Downloads/Codex-Synced-macOS-1.3.0.dmg
 ```
 
 3. 先尝试 Apple 推荐的方式：在 Finder 中进入 `Applications`，右键点击 `Codex Synced.app`，选择“打开”，再确认打开。
@@ -69,7 +69,10 @@ xattr -dr com.apple.quarantine "/Applications/Codex Synced.app"
 ## 主要功能
 
 - 自动识别当前 Codex Provider 和状态库。
-- 自动发现本地 `state_*.sqlite`，不写死具体数据库文件名。
+- 同时检查 `.codex` 根目录和 `.codex/sqlite`，根据数据库及 WAL/SHM 活跃时间选择真正正在使用的 `state_*.sqlite`。
+- Provider 对齐同时覆盖普通会话和归档会话，并同步 SQLite 与 rollout 首行 metadata。
+- 兼容新版 `threads.name`、毫秒时间字段和 `created_at > updated_at` 的时区迁移异常。
+- 流式改写大型 rollout 的首行，不把整份会话正文载入内存。
 - 预览 SQLite Provider 错配、短标题、更新时间、rollout mtime、`session_index.jsonl` 和全局 UI 状态修复项。
 - 修复前创建轻量备份或全量备份。
 - 轻量备份保存必要回滚数据，全量备份额外保存 sessions。

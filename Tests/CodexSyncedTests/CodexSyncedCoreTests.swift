@@ -53,6 +53,35 @@ struct CodexSyncedCoreTests {
         #expect(CodexPathResolver.effectiveSQLiteHome(settings: settings, parsedConfig: parsed).path == nested.standardizedFileURL.path)
     }
 
+    @Test func sqliteHomeChoosesNewestActiveDatabaseAcrossRootAndNested() throws {
+        let directory = try makeTempDirectory()
+        let nested = directory.appendingPathComponent("sqlite")
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        let rootState = directory.appendingPathComponent("state_5.sqlite")
+        let nestedState = nested.appendingPathComponent("state_5.sqlite")
+        try Data().write(to: rootState)
+        try Data().write(to: nestedState)
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 10)], ofItemAtPath: rootState.path)
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 20)], ofItemAtPath: nestedState.path)
+
+        let settings = AppSettings(
+            language: .zh,
+            codexHome: directory,
+            sqliteHome: nil,
+            defaultBackupMode: .lightweight,
+            lightweightLimit: 5,
+            fullLimit: 3,
+            openCodexAfterRepair: false
+        )
+        let parsed = ParsedConfig(rootValues: [:], providerSections: [:])
+        #expect(CodexPathResolver.effectiveSQLiteHome(settings: settings, parsedConfig: parsed).path == nested.path)
+
+        let rootWal = URL(fileURLWithPath: rootState.path + "-wal")
+        try Data().write(to: rootWal)
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 30)], ofItemAtPath: rootWal.path)
+        #expect(CodexPathResolver.effectiveSQLiteHome(settings: settings, parsedConfig: parsed).path == directory.path)
+    }
+
     @Test func rolloutRepairOnlyChangesSessionMetaProvider() throws {
         let directory = try makeTempDirectory()
         let rollout = directory.appendingPathComponent("rollout-test.jsonl")
@@ -141,7 +170,8 @@ struct CodexSyncedCoreTests {
             title: "Provider align",
             provider: "openai",
             cwd: directory.path,
-            firstUserMessage: "Provider align"
+            firstUserMessage: "Provider align",
+            archived: true
         )
         let sqliteRepairs = SidebarRepairPlanner.providerAlignmentRepairs(threads: [thread], targetProvider: "custom")
         let rolloutRepairs = SidebarRepairPlanner.rolloutProviderAlignmentRepairs(threads: [thread], targetProvider: "custom")
@@ -156,6 +186,91 @@ struct CodexSyncedCoreTests {
         let content = try String(contentsOf: rollout, encoding: .utf8)
         #expect(content.contains("\"model_provider\":\"custom\""))
         #expect(content.contains("\"text\":\"keep me\""))
+    }
+
+    @Test func titleRepairRemovesToolSyntaxAndUsesConversationPreview() throws {
+        let directory = try makeTempDirectory()
+        let rollout = directory.appendingPathComponent("rollout-title.jsonl")
+        try #"{"type":"session_meta","payload":{"id":"title","model_provider":"custom"}}"#
+            .appending("\n")
+            .write(to: rollout, atomically: true, encoding: .utf8)
+        let thread = makeThread(
+            id: "title",
+            rollout: rollout,
+            title: "查看OS agent'}】 }]}} to=functions.exec",
+            provider: "custom",
+            cwd: directory.path,
+            firstUserMessage: "读取os的agent",
+            preview: "读取os的agent"
+        )
+
+        let repairs = SidebarRepairPlanner.titleRepairs(threads: [thread])
+
+        #expect(repairs.count == 1)
+        #expect(repairs.first?.targetTitle.contains("functions.exec") == false)
+        #expect(repairs.first?.targetTitle.hasPrefix("读取os的agent") == true)
+    }
+
+    @Test func timestampRepairCorrectsCreatedAtAheadOfConversation() throws {
+        let directory = try makeTempDirectory()
+        let rollout = directory.appendingPathComponent("rollout-created-at.jsonl")
+        try """
+        {"timestamp":"2026-06-27T07:27:02.000Z","type":"session_meta","payload":{"id":"created-at","model_provider":"custom"}}
+        {"timestamp":"2026-06-27T07:27:25.000Z","type":"event_msg","payload":{"message":"done"}}
+        """.write(to: rollout, atomically: true, encoding: .utf8)
+        let firstMs: Int64 = 1_782_545_222_000
+        let updatedMs: Int64 = 1_782_545_245_000
+        let thread = makeThread(
+            id: "created-at",
+            rollout: rollout,
+            title: "Created at",
+            provider: "custom",
+            cwd: directory.path,
+            updatedAt: updatedMs / 1000,
+            updatedAtMs: updatedMs,
+            firstUserMessage: "Created at",
+            createdAt: (firstMs + 28_800_000) / 1000,
+            createdAtMs: firstMs + 28_800_000,
+            recencyAt: firstMs / 1000,
+            recencyAtMs: firstMs
+        )
+        let info = SidebarRepairPlanner.rolloutInfoByPath(for: [thread])
+
+        let repairs = SidebarRepairPlanner.timestampRepairs(threads: [thread], rollouts: info)
+
+        #expect(repairs.count == 1)
+        #expect(repairs.first?.targetCreatedAtMs == firstMs)
+        #expect(repairs.first?.targetUpdatedAtMs == updatedMs)
+    }
+
+    @Test func rebuiltIndexKeepsArchivedAndInternalThreadRecords() throws {
+        let directory = try makeTempDirectory()
+        let archivedRollout = directory.appendingPathComponent("archived.jsonl")
+        let internalRollout = directory.appendingPathComponent("internal.jsonl")
+        try "{}\n".write(to: archivedRollout, atomically: true, encoding: .utf8)
+        try "{}\n".write(to: internalRollout, atomically: true, encoding: .utf8)
+        let archived = makeThread(
+            id: "archived",
+            rollout: archivedRollout,
+            title: "Archived",
+            provider: "custom",
+            cwd: directory.path,
+            firstUserMessage: "Archived",
+            archived: true
+        )
+        let internalThread = makeThread(
+            id: "internal",
+            rollout: internalRollout,
+            title: "Internal",
+            provider: "custom",
+            cwd: directory.path,
+            firstUserMessage: "Internal",
+            source: #"{"subagent":{"other":"guardian"}}"#
+        )
+
+        let repairs = SidebarRepairPlanner.indexRepairs(codexHome: directory, threads: [archived, internalThread])
+
+        #expect(Set(repairs.map(\.threadID)) == ["archived", "internal"])
     }
 
     @Test func sidebarPlannerDetectsDesktopSummaryRepairs() throws {
@@ -218,7 +333,13 @@ struct CodexSyncedCoreTests {
         updatedAt: Int64 = 1,
         updatedAtMs: Int64? = 1000,
         firstUserMessage: String,
-        preview: String = ""
+        preview: String = "",
+        source: String = "vscode",
+        archived: Bool = false,
+        createdAt: Int64 = 0,
+        createdAtMs: Int64? = nil,
+        recencyAt: Int64 = 0,
+        recencyAtMs: Int64? = nil
     ) -> ThreadRow {
         ThreadRow(
             id: id,
@@ -227,13 +348,17 @@ struct CodexSyncedCoreTests {
             modelProvider: provider,
             hasUserEvent: true,
             cwd: cwd,
-            source: "vscode",
+            source: source,
             threadSource: "user",
-            archived: false,
+            archived: archived,
             updatedAt: updatedAt,
             updatedAtMs: updatedAtMs,
             firstUserMessage: firstUserMessage,
-            preview: preview
+            preview: preview,
+            createdAt: createdAt,
+            createdAtMs: createdAtMs,
+            recencyAt: recencyAt,
+            recencyAtMs: recencyAtMs
         )
     }
 }

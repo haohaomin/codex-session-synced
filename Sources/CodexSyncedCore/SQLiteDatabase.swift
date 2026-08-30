@@ -33,15 +33,24 @@ final class SQLiteDatabase {
     func queryThreads() throws -> [ThreadRow] {
         let columns = try tableColumns("threads")
         let updatedAtMsExpression = columns.contains("updated_at_ms") ? "updated_at_ms" : "NULL"
+        let createdAtExpression = columns.contains("created_at") ? "created_at" : "0"
+        let createdAtMsExpression = columns.contains("created_at_ms") ? "created_at_ms" : "NULL"
+        let recencyAtExpression = columns.contains("recency_at") ? "recency_at" : "0"
+        let recencyAtMsExpression = columns.contains("recency_at_ms") ? "recency_at_ms" : "NULL"
         let sourceExpression = columns.contains("source") ? "source" : "''"
         let firstUserExpression = columns.contains("first_user_message") ? "first_user_message" : "''"
         let previewExpression = columns.contains("preview") ? "preview" : "''"
+        let titleExpression = columns.contains("name") ? "COALESCE(NULLIF(name, ''), title)" : "title"
         let sql = """
-        SELECT id, rollout_path, title, model_provider, has_user_event, cwd, thread_source, archived, updated_at,
+        SELECT id, rollout_path, \(titleExpression), model_provider, has_user_event, cwd, thread_source, archived, updated_at,
                \(updatedAtMsExpression) AS updated_at_ms,
                \(sourceExpression) AS source,
                \(firstUserExpression) AS first_user_message,
-               \(previewExpression) AS preview
+               \(previewExpression) AS preview,
+               \(createdAtExpression) AS created_at,
+               \(createdAtMsExpression) AS created_at_ms,
+               \(recencyAtExpression) AS recency_at,
+               \(recencyAtMsExpression) AS recency_at_ms
         FROM threads
         ORDER BY COALESCE(NULLIF(\(updatedAtMsExpression), 0), updated_at * 1000) DESC
         """
@@ -66,7 +75,11 @@ final class SQLiteDatabase {
                 updatedAt: sqlite3_column_int64(statement, 8),
                 updatedAtMs: nullableInt64(statement, 9),
                 firstUserMessage: text(statement, 11),
-                preview: text(statement, 12)
+                preview: text(statement, 12),
+                createdAt: sqlite3_column_int64(statement, 13),
+                createdAtMs: nullableInt64(statement, 14),
+                recencyAt: sqlite3_column_int64(statement, 15),
+                recencyAtMs: nullableInt64(statement, 16)
             ))
         }
         return rows
@@ -102,29 +115,45 @@ final class SQLiteDatabase {
     func updateTimestamps(_ repairs: [TimestampRepair]) throws {
         guard !repairs.isEmpty else { return }
         let columns = try tableColumns("threads")
-        let sql = columns.contains("updated_at_ms")
-            ? "UPDATE threads SET updated_at = ?, updated_at_ms = ? WHERE id = ?"
-            : "UPDATE threads SET updated_at = ? WHERE id = ?"
 
         try execute("BEGIN IMMEDIATE")
         do {
-            var statement: OpaquePointer?
-            guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
-                throw SQLiteError.prepareFailed(errorMessage)
-            }
-            defer { sqlite3_finalize(statement) }
-
             for repair in repairs {
-                sqlite3_reset(statement)
-                sqlite3_clear_bindings(statement)
-                sqlite3_bind_int64(statement, 1, repair.targetUpdatedAtMs / 1000)
+                var assignments = ["updated_at = ?"]
                 if columns.contains("updated_at_ms") {
-                    sqlite3_bind_int64(statement, 2, repair.targetUpdatedAtMs)
-                    bind(repair.threadID, to: statement, index: 3)
-                } else {
-                    bind(repair.threadID, to: statement, index: 2)
+                    assignments.append("updated_at_ms = ?")
                 }
-                guard sqlite3_step(statement) == SQLITE_DONE else {
+                if repair.targetCreatedAtMs != nil, columns.contains("created_at") {
+                    assignments.append("created_at = ?")
+                    if columns.contains("created_at_ms") {
+                        assignments.append("created_at_ms = ?")
+                    }
+                }
+                let sql = "UPDATE threads SET \(assignments.joined(separator: ", ")) WHERE id = ?"
+                var statement: OpaquePointer?
+                guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+                    throw SQLiteError.prepareFailed(errorMessage)
+                }
+
+                var index: Int32 = 1
+                sqlite3_bind_int64(statement, index, repair.targetUpdatedAtMs / 1000)
+                index += 1
+                if columns.contains("updated_at_ms") {
+                    sqlite3_bind_int64(statement, index, repair.targetUpdatedAtMs)
+                    index += 1
+                }
+                if let createdAtMs = repair.targetCreatedAtMs, columns.contains("created_at") {
+                    sqlite3_bind_int64(statement, index, createdAtMs / 1000)
+                    index += 1
+                    if columns.contains("created_at_ms") {
+                        sqlite3_bind_int64(statement, index, createdAtMs)
+                        index += 1
+                    }
+                }
+                bind(repair.threadID, to: statement, index: index)
+                let result = sqlite3_step(statement)
+                sqlite3_finalize(statement)
+                guard result == SQLITE_DONE else {
                     throw SQLiteError.stepFailed(errorMessage)
                 }
             }
@@ -137,9 +166,12 @@ final class SQLiteDatabase {
 
     func updateTitles(_ repairs: [TitleRepair]) throws {
         guard !repairs.isEmpty else { return }
+        let columns = try tableColumns("threads")
         try execute("BEGIN IMMEDIATE")
         do {
-            let sql = "UPDATE threads SET title = ? WHERE id = ?"
+            let sql = columns.contains("name")
+                ? "UPDATE threads SET title = ?, name = ? WHERE id = ?"
+                : "UPDATE threads SET title = ? WHERE id = ?"
             var statement: OpaquePointer?
             guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
                 throw SQLiteError.prepareFailed(errorMessage)
@@ -150,7 +182,12 @@ final class SQLiteDatabase {
                 sqlite3_reset(statement)
                 sqlite3_clear_bindings(statement)
                 bind(repair.targetTitle, to: statement, index: 1)
-                bind(repair.threadID, to: statement, index: 2)
+                if columns.contains("name") {
+                    bind(repair.targetTitle, to: statement, index: 2)
+                    bind(repair.threadID, to: statement, index: 3)
+                } else {
+                    bind(repair.threadID, to: statement, index: 2)
+                }
                 guard sqlite3_step(statement) == SQLITE_DONE else {
                     throw SQLiteError.stepFailed(errorMessage)
                 }

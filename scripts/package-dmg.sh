@@ -87,25 +87,27 @@ hdiutil create -volname "$APP_NAME" -srcfolder "$DMG_STAGING_DIR" -ov -format UD
 MOUNT_DIR="$(hdiutil attach "$RW_DMG" -readwrite -noverify -noautoopen | awk 'index($0, "/Volumes/") { print substr($0, index($0, "/Volumes/")); exit }')"
 
 osascript <<APPLESCRIPT
-tell application "Finder"
-  tell disk "$APP_NAME"
-    open
-    set current view of container window to icon view
-    set toolbar visible of container window to false
-    set statusbar visible of container window to false
-    set the bounds of container window to {120, 120, 880, 540}
-    set viewOptions to the icon view options of container window
-    set arrangement of viewOptions to not arranged
-    set icon size of viewOptions to 96
-    set background picture of viewOptions to POSIX file "$MOUNT_DIR/$APP_NAME.app/Contents/Resources/DMGBackground.png"
-    set position of item "$APP_NAME.app" of container window to {190, 218}
-    set position of item "Applications" of container window to {570, 218}
-    close
-    open
-    update without registering applications
-    delay 1
+with timeout of 300 seconds
+  tell application "Finder"
+    tell disk "$APP_NAME"
+      open
+      set current view of container window to icon view
+      set toolbar visible of container window to false
+      set statusbar visible of container window to false
+      set the bounds of container window to {120, 120, 880, 540}
+      set viewOptions to the icon view options of container window
+      set arrangement of viewOptions to not arranged
+      set icon size of viewOptions to 96
+      set background picture of viewOptions to POSIX file "$MOUNT_DIR/$APP_NAME.app/Contents/Resources/DMGBackground.png"
+      set position of item "$APP_NAME.app" of container window to {190, 218}
+      set position of item "Applications" of container window to {570, 218}
+      close
+      open
+      update without registering applications
+      delay 1
+    end tell
   end tell
-end tell
+end timeout
 APPLESCRIPT
 
 rm -rf "$MOUNT_DIR/.fseventsd"

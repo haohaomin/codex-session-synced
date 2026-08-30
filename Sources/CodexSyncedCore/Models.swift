@@ -139,6 +139,10 @@ public struct ThreadRow: Identifiable, Equatable, Codable, Sendable {
     public var updatedAtMs: Int64?
     public var firstUserMessage: String
     public var preview: String
+    public var createdAt: Int64
+    public var createdAtMs: Int64?
+    public var recencyAt: Int64
+    public var recencyAtMs: Int64?
 
     public var effectiveUpdatedAtMs: Int64 {
         if let updatedAtMs, updatedAtMs > 0 {
@@ -147,7 +151,21 @@ public struct ThreadRow: Identifiable, Equatable, Codable, Sendable {
         return updatedAt * 1000
     }
 
-    public init(id: String, rolloutPath: String, title: String, modelProvider: String, hasUserEvent: Bool, cwd: String, source: String, threadSource: String?, archived: Bool, updatedAt: Int64, updatedAtMs: Int64?, firstUserMessage: String, preview: String) {
+    public var effectiveCreatedAtMs: Int64 {
+        if let createdAtMs, createdAtMs > 0 {
+            return createdAtMs
+        }
+        return createdAt * 1000
+    }
+
+    public var effectiveRecencyAtMs: Int64? {
+        if let recencyAtMs, recencyAtMs > 0 {
+            return recencyAtMs
+        }
+        return recencyAt > 0 ? recencyAt * 1000 : nil
+    }
+
+    public init(id: String, rolloutPath: String, title: String, modelProvider: String, hasUserEvent: Bool, cwd: String, source: String, threadSource: String?, archived: Bool, updatedAt: Int64, updatedAtMs: Int64?, firstUserMessage: String, preview: String, createdAt: Int64 = 0, createdAtMs: Int64? = nil, recencyAt: Int64 = 0, recencyAtMs: Int64? = nil) {
         self.id = id
         self.rolloutPath = rolloutPath
         self.title = title
@@ -161,6 +179,10 @@ public struct ThreadRow: Identifiable, Equatable, Codable, Sendable {
         self.updatedAtMs = updatedAtMs
         self.firstUserMessage = firstUserMessage
         self.preview = preview
+        self.createdAt = createdAt
+        self.createdAtMs = createdAtMs
+        self.recencyAt = recencyAt
+        self.recencyAtMs = recencyAtMs
     }
 }
 
@@ -215,12 +237,16 @@ public struct TimestampRepair: Identifiable, Equatable, Codable, Sendable {
     public var title: String
     public var currentUpdatedAtMs: Int64
     public var targetUpdatedAtMs: Int64
+    public var currentCreatedAtMs: Int64?
+    public var targetCreatedAtMs: Int64?
 
-    public init(threadID: String, title: String, currentUpdatedAtMs: Int64, targetUpdatedAtMs: Int64) {
+    public init(threadID: String, title: String, currentUpdatedAtMs: Int64, targetUpdatedAtMs: Int64, currentCreatedAtMs: Int64? = nil, targetCreatedAtMs: Int64? = nil) {
         self.threadID = threadID
         self.title = title
         self.currentUpdatedAtMs = currentUpdatedAtMs
         self.targetUpdatedAtMs = targetUpdatedAtMs
+        self.currentCreatedAtMs = currentCreatedAtMs
+        self.targetCreatedAtMs = targetCreatedAtMs
     }
 }
 

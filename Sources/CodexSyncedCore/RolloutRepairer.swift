@@ -34,27 +34,51 @@ enum RolloutRepairer {
     }
 
     static func apply(_ repair: RolloutRepair) throws {
-        let data = try Data(contentsOf: repair.url)
-        guard let content = String(data: data, encoding: .utf8) else { return }
-        let newContent: String
-        if let newlineRange = content.range(of: "\n") {
-            newContent = repair.repairedFirstLine + content[newlineRange.lowerBound...]
-        } else {
-            newContent = repair.repairedFirstLine + "\n"
-        }
-        try newContent.write(to: repair.url, atomically: true, encoding: .utf8)
+        try replaceFirstLine(url: repair.url, with: repair.repairedFirstLine)
     }
 
     static func restore(url: URL, firstLine: String) throws {
-        let data = try Data(contentsOf: url)
-        guard let content = String(data: data, encoding: .utf8) else { return }
-        let newContent: String
-        if let newlineRange = content.range(of: "\n") {
-            newContent = firstLine + content[newlineRange.lowerBound...]
-        } else {
-            newContent = firstLine + "\n"
+        try replaceFirstLine(url: url, with: firstLine)
+    }
+
+    private static func replaceFirstLine(url: URL, with firstLine: String) throws {
+        let fm = FileManager.default
+        let input = try FileHandle(forReadingFrom: url)
+        defer { try? input.close() }
+
+        let temp = url.deletingLastPathComponent()
+            .appendingPathComponent(".\(url.lastPathComponent).codex-synced-\(UUID().uuidString).tmp")
+        guard fm.createFile(atPath: temp.path, contents: nil) else {
+            throw CocoaError(.fileWriteUnknown)
         }
-        try newContent.write(to: url, atomically: true, encoding: .utf8)
+        let output = try FileHandle(forWritingTo: temp)
+        do {
+            try output.write(contentsOf: Data((firstLine + "\n").utf8))
+            var foundNewline = false
+            while let chunk = try input.read(upToCount: 1024 * 1024), !chunk.isEmpty {
+                if foundNewline {
+                    try output.write(contentsOf: chunk)
+                    continue
+                }
+                guard let newline = chunk.firstIndex(of: UInt8(ascii: "\n")) else {
+                    continue
+                }
+                foundNewline = true
+                let suffixStart = chunk.index(after: newline)
+                if suffixStart < chunk.endIndex {
+                    try output.write(contentsOf: chunk[suffixStart...])
+                }
+            }
+            try output.close()
+            if let permissions = try? fm.attributesOfItem(atPath: url.path)[.posixPermissions] {
+                try? fm.setAttributes([.posixPermissions: permissions], ofItemAtPath: temp.path)
+            }
+            _ = try fm.replaceItemAt(url, withItemAt: temp)
+        } catch {
+            try? output.close()
+            try? fm.removeItem(at: temp)
+            throw error
+        }
     }
 
     private static func firstLine(url: URL) -> String? {

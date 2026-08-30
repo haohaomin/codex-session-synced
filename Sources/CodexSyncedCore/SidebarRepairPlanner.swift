@@ -5,6 +5,7 @@ enum SidebarRepairPlanner {
 
     struct RolloutInfo {
         var provider: String?
+        var firstTimestampMs: Int64?
         var lastTimestampMs: Int64?
     }
 
@@ -29,7 +30,7 @@ enum SidebarRepairPlanner {
 
     static func providerAlignmentRepairs(threads: [ThreadRow], targetProvider: String) -> [ProviderRepair] {
         guard !targetProvider.isEmpty else { return [] }
-        return visibleResumeThreads(threads)
+        return providerAlignmentThreads(threads)
             .filter { $0.modelProvider != targetProvider }
             .map { ProviderRepair(thread: $0, targetProvider: targetProvider) }
     }
@@ -37,7 +38,7 @@ enum SidebarRepairPlanner {
     static func rolloutProviderAlignmentRepairs(threads: [ThreadRow], targetProvider: String) -> [RolloutRepair] {
         guard !targetProvider.isEmpty else { return [] }
         var seen = Set<String>()
-        return visibleResumeThreads(threads).compactMap { thread in
+        return providerAlignmentThreads(threads).compactMap { thread in
             guard seen.insert(thread.rolloutPath).inserted else { return nil }
             return RolloutRepairer.makeRepair(url: URL(fileURLWithPath: thread.rolloutPath), targetProvider: targetProvider)
         }
@@ -45,28 +46,52 @@ enum SidebarRepairPlanner {
 
     static func timestampRepairs(threads: [ThreadRow], rollouts: [String: RolloutInfo]) -> [TimestampRepair] {
         threads.compactMap { thread in
-            guard let target = rollouts[thread.rolloutPath]?.lastTimestampMs else {
+            guard let info = rollouts[thread.rolloutPath] else {
                 return nil
             }
-            let current = thread.effectiveUpdatedAtMs
-            guard abs(current - target) > 1000 else {
+            let currentUpdatedAtMs = thread.effectiveUpdatedAtMs
+            let targetUpdatedAtMs = info.lastTimestampMs ?? currentUpdatedAtMs
+            let updatedChanged = abs(currentUpdatedAtMs - targetUpdatedAtMs) > 1000
+
+            let currentCreatedAtMs = thread.effectiveCreatedAtMs
+            let targetCreatedAtMs: Int64?
+            if currentCreatedAtMs > targetUpdatedAtMs {
+                targetCreatedAtMs = [info.firstTimestampMs, thread.effectiveRecencyAtMs]
+                    .compactMap { $0 }
+                    .filter { $0 > 0 && $0 <= targetUpdatedAtMs }
+                    .min() ?? targetUpdatedAtMs
+            } else {
+                targetCreatedAtMs = nil
+            }
+
+            guard updatedChanged || targetCreatedAtMs != nil else {
                 return nil
             }
-            return TimestampRepair(threadID: thread.id, title: thread.title, currentUpdatedAtMs: current, targetUpdatedAtMs: target)
+            return TimestampRepair(
+                threadID: thread.id,
+                title: thread.title,
+                currentUpdatedAtMs: currentUpdatedAtMs,
+                targetUpdatedAtMs: targetUpdatedAtMs,
+                currentCreatedAtMs: currentCreatedAtMs,
+                targetCreatedAtMs: targetCreatedAtMs
+            )
         }
     }
 
     static func titleRepairs(threads: [ThreadRow]) -> [TitleRepair] {
         threads
-            .filter { !$0.archived && sidebarSourceKind($0.source) != nil && rolloutExists($0.rolloutPath) }
+            .filter { sidebarSourceKind($0.source) != nil && rolloutExists($0.rolloutPath) }
             .sorted { ($0.effectiveUpdatedAtMs, $0.id) < ($1.effectiveUpdatedAtMs, $1.id) }
             .compactMap { thread in
                 let title = normalizeTitleText(thread.title)
                 let first = normalizeTitleText(thread.firstUserMessage)
-                guard title.isEmpty || title == first else {
+                let corrupted = looksCorruptedTitle(title)
+                guard title.isEmpty || title == first || corrupted else {
                     return nil
                 }
-                let seed = thread.title.isEmpty ? (thread.preview.isEmpty ? thread.firstUserMessage : thread.preview) : thread.title
+                let seed = title.isEmpty || corrupted
+                    ? (thread.preview.isEmpty ? thread.firstUserMessage : thread.preview)
+                    : thread.title
                 let next = shortenSidebarTitle(seed, cwd: thread.cwd, firstUserMessage: thread.firstUserMessage)
                 guard !next.isEmpty, next != thread.title else {
                     return nil
@@ -106,6 +131,9 @@ enum SidebarRepairPlanner {
     static func projectedThreads(threads: [ThreadRow], titleRepairs: [TitleRepair], timestampRepairs: [TimestampRepair]) -> [ThreadRow] {
         let titleByID = Dictionary(uniqueKeysWithValues: titleRepairs.map { ($0.threadID, $0.targetTitle) })
         let timestampByID = Dictionary(uniqueKeysWithValues: timestampRepairs.map { ($0.threadID, $0.targetUpdatedAtMs) })
+        let createdAtByID = Dictionary(uniqueKeysWithValues: timestampRepairs.compactMap { repair in
+            repair.targetCreatedAtMs.map { (repair.threadID, $0) }
+        })
         return threads.map { thread in
             var next = thread
             if let title = titleByID[thread.id] {
@@ -114,6 +142,10 @@ enum SidebarRepairPlanner {
             if let timestamp = timestampByID[thread.id] {
                 next.updatedAt = timestamp / 1000
                 next.updatedAtMs = timestamp
+            }
+            if let timestamp = createdAtByID[thread.id] {
+                next.createdAt = timestamp / 1000
+                next.createdAtMs = timestamp
             }
             return next
         }
@@ -236,8 +268,16 @@ enum SidebarRepairPlanner {
     }
 
     private static func resumeInventory(threads: [ThreadRow]) -> [IndexRepair] {
-        visibleResumeThreads(threads)
+        threads
+            .filter { rolloutExists($0.rolloutPath) }
+            .sorted { ($0.effectiveUpdatedAtMs, $0.id) < ($1.effectiveUpdatedAtMs, $1.id) }
             .map { IndexRepair(threadID: $0.id, title: $0.title, updatedAtMs: $0.effectiveUpdatedAtMs) }
+    }
+
+    private static func providerAlignmentThreads(_ threads: [ThreadRow]) -> [ThreadRow] {
+        threads
+            .filter { sidebarSourceKind($0.source) != nil && rolloutExists($0.rolloutPath) }
+            .sorted { ($0.effectiveUpdatedAtMs, $0.id) < ($1.effectiveUpdatedAtMs, $1.id) }
     }
 
     private static func visibleResumeThreads(_ threads: [ThreadRow]) -> [ThreadRow] {
@@ -272,6 +312,7 @@ enum SidebarRepairPlanner {
             return RolloutInfo()
         }
         var provider: String?
+        var firstTimestampMs: Int64?
         var lastTimestampMs: Int64?
         for line in content.components(separatedBy: .newlines) where !line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             guard let data = line.data(using: .utf8),
@@ -285,10 +326,13 @@ enum SidebarRepairPlanner {
             }
             if let timestamp = object["timestamp"] as? String,
                let parsed = parseTimestampMs(timestamp) {
+                if firstTimestampMs == nil {
+                    firstTimestampMs = parsed
+                }
                 lastTimestampMs = parsed
             }
         }
-        return RolloutInfo(provider: provider, lastTimestampMs: lastTimestampMs)
+        return RolloutInfo(provider: provider, firstTimestampMs: firstTimestampMs, lastTimestampMs: lastTimestampMs)
     }
 
     private static func rolloutExists(_ path: String) -> Bool {
@@ -310,6 +354,19 @@ enum SidebarRepairPlanner {
         text = text.replacingOccurrences(of: #"<appshot\b[^>]*>.*?</appshot>"#, with: " ", options: [.regularExpression, .caseInsensitive])
         text = text.replacingOccurrences(of: #"\[([^\]]{1,120})\]\([^)]+\)"#, with: "$1", options: [.regularExpression])
         return text.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func looksCorruptedTitle(_ value: String) -> Bool {
+        let markers = [
+            "to=functions.",
+            "to be plain",
+            "need plain text",
+            "not xml",
+            "wait there is extra",
+            "'}]}",
+            "}】"
+        ]
+        return markers.contains { value.range(of: $0, options: .caseInsensitive) != nil }
     }
 
     private static func shortenSidebarTitle(_ value: String, cwd: String, firstUserMessage: String) -> String {

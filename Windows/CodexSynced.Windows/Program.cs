@@ -119,9 +119,15 @@ internal sealed record ThreadRow(
     long UpdatedAt,
     long? UpdatedAtMs,
     string FirstUserMessage,
-    string Preview)
+    string Preview,
+    long CreatedAt = 0,
+    long? CreatedAtMs = null,
+    long RecencyAt = 0,
+    long? RecencyAtMs = null)
 {
     public long EffectiveUpdatedAtMs => UpdatedAtMs is > 0 ? UpdatedAtMs.Value : UpdatedAt * 1000;
+    public long EffectiveCreatedAtMs => CreatedAtMs is > 0 ? CreatedAtMs.Value : CreatedAt * 1000;
+    public long? EffectiveRecencyAtMs => RecencyAtMs is > 0 ? RecencyAtMs.Value : RecencyAt > 0 ? RecencyAt * 1000 : null;
 }
 internal sealed record ProviderRepair(ThreadRow Thread, string TargetProvider);
 internal sealed record RolloutRepair(
@@ -132,7 +138,13 @@ internal sealed record RolloutRepair(
     string OriginalFirstLine,
     string RepairedFirstLine);
 internal sealed record IndexRepair(string ThreadId, string Title, long UpdatedAtMs);
-internal sealed record TimestampRepair(string ThreadId, string Title, long CurrentUpdatedAtMs, long TargetUpdatedAtMs);
+internal sealed record TimestampRepair(
+    string ThreadId,
+    string Title,
+    long CurrentUpdatedAtMs,
+    long TargetUpdatedAtMs,
+    long? CurrentCreatedAtMs = null,
+    long? TargetCreatedAtMs = null);
 internal sealed record TitleRepair(string ThreadId, string CurrentTitle, string TargetTitle);
 internal sealed record RolloutMtimeRepair(string ThreadId, string Title, string RolloutPath, long CurrentMtimeMs, long TargetMtimeMs);
 internal sealed record GlobalStateRepair(List<string> Changes, string RepairedJson);
@@ -438,7 +450,7 @@ internal sealed class RepairService
     private static StateDatabase? LatestStateDatabase(string sqliteHome) =>
         Directory.Exists(sqliteHome)
             ? Directory.EnumerateFiles(sqliteHome, "state_*.sqlite", SearchOption.TopDirectoryOnly)
-                .Select(path => new StateDatabase(path, File.GetLastWriteTimeUtc(path)))
+                .Select(path => new StateDatabase(path, StateDatabaseActivity(path)))
                 .OrderByDescending(state => state.ModifiedAt)
                 .FirstOrDefault()
             : null;
@@ -448,40 +460,51 @@ internal sealed class RepairService
         if (!string.IsNullOrWhiteSpace(explicitSQLiteHome))
             return Path.GetFullPath(explicitSQLiteHome);
 
+        var rootSQLiteHome = Path.GetFullPath(codexHome);
         var nestedSQLiteHome = Path.Combine(codexHome, "sqlite");
-        return ContainsStateDatabase(nestedSQLiteHome)
-            ? Path.GetFullPath(nestedSQLiteHome)
-            : Path.GetFullPath(codexHome);
+        return new[] { rootSQLiteHome, Path.GetFullPath(nestedSQLiteHome) }
+            .Select(directory => (Directory: directory, State: LatestStateDatabase(directory)))
+            .Where(item => item.State is not null)
+            .OrderByDescending(item => item.State!.ModifiedAt)
+            .Select(item => item.Directory)
+            .FirstOrDefault() ?? rootSQLiteHome;
     }
 
-    private static bool ContainsStateDatabase(string directory)
+    private static DateTime StateDatabaseActivity(string path)
     {
-        try
-        {
-            return Directory.Exists(directory) &&
-                Directory.EnumerateFiles(directory, "state_*.sqlite", SearchOption.TopDirectoryOnly).Any();
-        }
-        catch (IOException)
-        {
-            return false;
-        }
-        catch (UnauthorizedAccessException)
-        {
-            return false;
-        }
+        return new[] { path, path + "-wal", path + "-shm" }
+            .Where(File.Exists)
+            .Select(File.GetLastWriteTimeUtc)
+            .DefaultIfEmpty(DateTime.MinValue)
+            .Max();
     }
 
     private static void ApplyRolloutRepair(string path, string firstLine)
     {
-        var bytes = ReadAllBytesShared(path);
-        var newline = Array.IndexOf(bytes, (byte)'\n');
-        var suffix = newline >= 0 ? bytes[(newline + 1)..] : [];
         var temp = path + ".codex-synced.tmp";
-        using (var stream = File.Create(temp))
+        using (var input = OpenSharedRead(path))
+        using (var output = File.Create(temp))
         {
-            stream.Write(Encoding.UTF8.GetBytes(firstLine));
-            stream.WriteByte((byte)'\n');
-            stream.Write(suffix);
+            output.Write(Encoding.UTF8.GetBytes(firstLine));
+            output.WriteByte((byte)'\n');
+            var buffer = new byte[1024 * 1024];
+            var foundNewline = false;
+            int read;
+            while ((read = input.Read(buffer, 0, buffer.Length)) > 0)
+            {
+                if (foundNewline)
+                {
+                    output.Write(buffer, 0, read);
+                    continue;
+                }
+                var newline = Array.IndexOf(buffer, (byte)'\n', 0, read);
+                if (newline < 0)
+                    continue;
+                foundNewline = true;
+                var suffixStart = newline + 1;
+                if (suffixStart < read)
+                    output.Write(buffer, suffixStart, read - suffixStart);
+            }
         }
         File.Move(temp, path, true);
     }
@@ -513,7 +536,7 @@ internal sealed class RepairService
         return new(path, sessionId, current, targetProvider, firstLine, repairedFirstLine);
     }
 
-    private sealed record RolloutInfo(string? Provider, long? LastTimestampMs);
+    private sealed record RolloutInfo(string? Provider, long? FirstTimestampMs, long? LastTimestampMs);
 
     private static Dictionary<string, RolloutInfo> RolloutInfoByPath(List<ThreadRow> threads)
     {
@@ -526,8 +549,9 @@ internal sealed class RepairService
     private static RolloutInfo InspectRollout(string path)
     {
         if (!File.Exists(path))
-            return new(null, null);
+            return new(null, null, null);
         string? provider = null;
+        long? firstTimestamp = null;
         long? lastTimestamp = null;
         foreach (var line in ReadLinesShared(path))
         {
@@ -540,14 +564,17 @@ internal sealed class RepairService
                     provider = payload["model_provider"]?.GetValue<string>();
                 var timestamp = node?["timestamp"]?.GetValue<string>();
                 if (timestamp is not null && TryParseTimestampMs(timestamp, out var parsed))
+                {
+                    firstTimestamp ??= parsed;
                     lastTimestamp = parsed;
+                }
             }
             catch
             {
                 // Ignore malformed rollout lines; other lines can still carry usable timestamps.
             }
         }
-        return new(provider, lastTimestamp);
+        return new(provider, firstTimestamp, lastTimestamp);
     }
 
     private static List<ProviderRepair> ProviderRepairs(List<ThreadRow> threads, Dictionary<string, RolloutInfo> rollouts) =>
@@ -559,7 +586,7 @@ internal sealed class RepairService
     private static List<ProviderRepair> ProviderAlignmentRepairs(List<ThreadRow> threads, string targetProvider) =>
         string.IsNullOrWhiteSpace(targetProvider)
             ? []
-            : VisibleResumeThreads(threads)
+            : ProviderAlignmentThreads(threads)
                 .Where(row => row.ModelProvider != targetProvider)
                 .Select(row => new ProviderRepair(row, targetProvider))
                 .ToList();
@@ -569,7 +596,7 @@ internal sealed class RepairService
         if (string.IsNullOrWhiteSpace(targetProvider))
             return [];
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        return VisibleResumeThreads(threads)
+        return ProviderAlignmentThreads(threads)
             .Where(row => seen.Add(row.RolloutPath))
             .Select(row => MakeRolloutRepair(row.RolloutPath, targetProvider))
             .Where(repair => repair is not null)
@@ -577,22 +604,49 @@ internal sealed class RepairService
             .ToList();
     }
 
-    private static List<TimestampRepair> TimestampRepairs(List<ThreadRow> threads, Dictionary<string, RolloutInfo> rollouts) =>
-        threads
-            .Where(row => rollouts.TryGetValue(row.RolloutPath, out var info) && info.LastTimestampMs is not null && Math.Abs(row.EffectiveUpdatedAtMs - info.LastTimestampMs.Value) > 1000)
-            .Select(row => new TimestampRepair(row.Id, row.Title, row.EffectiveUpdatedAtMs, rollouts[row.RolloutPath].LastTimestampMs!.Value))
-            .ToList();
+    private static List<TimestampRepair> TimestampRepairs(List<ThreadRow> threads, Dictionary<string, RolloutInfo> rollouts)
+    {
+        var repairs = new List<TimestampRepair>();
+        foreach (var row in threads)
+        {
+            if (!rollouts.TryGetValue(row.RolloutPath, out var info))
+                continue;
+            var currentUpdatedAtMs = row.EffectiveUpdatedAtMs;
+            var targetUpdatedAtMs = info.LastTimestampMs ?? currentUpdatedAtMs;
+            var updatedChanged = Math.Abs(currentUpdatedAtMs - targetUpdatedAtMs) > 1000;
+            long? targetCreatedAtMs = null;
+            if (row.EffectiveCreatedAtMs > targetUpdatedAtMs)
+            {
+                targetCreatedAtMs = new[] { info.FirstTimestampMs, row.EffectiveRecencyAtMs }
+                    .Where(value => value.HasValue && value.Value > 0 && value.Value <= targetUpdatedAtMs)
+                    .Select(value => value!.Value)
+                    .DefaultIfEmpty(targetUpdatedAtMs)
+                    .Min();
+            }
+            if (updatedChanged || targetCreatedAtMs is not null)
+            {
+                repairs.Add(new(
+                    row.Id,
+                    row.Title,
+                    currentUpdatedAtMs,
+                    targetUpdatedAtMs,
+                    row.EffectiveCreatedAtMs,
+                    targetCreatedAtMs));
+            }
+        }
+        return repairs;
+    }
 
     private static List<TitleRepair> TitleRepairs(List<ThreadRow> threads) =>
         threads
-            .Where(row => !row.Archived && SidebarSourceKind(row.Source) is not null && RolloutExists(row.RolloutPath))
+            .Where(row => SidebarSourceKind(row.Source) is not null && RolloutExists(row.RolloutPath))
             .OrderBy(row => row.EffectiveUpdatedAtMs)
             .ThenBy(row => row.Id, StringComparer.OrdinalIgnoreCase)
             .Select(row => (row, title: NormalizeTitleText(row.Title), first: NormalizeTitleText(row.FirstUserMessage)))
-            .Where(item => string.IsNullOrWhiteSpace(item.title) || item.title == item.first)
+            .Where(item => string.IsNullOrWhiteSpace(item.title) || item.title == item.first || LooksCorruptedTitle(item.title))
             .Select(item =>
             {
-                var seed = string.IsNullOrWhiteSpace(item.row.Title)
+                var seed = string.IsNullOrWhiteSpace(item.row.Title) || LooksCorruptedTitle(item.title)
                     ? string.IsNullOrWhiteSpace(item.row.Preview) ? item.row.FirstUserMessage : item.row.Preview
                     : item.row.Title;
                 return new TitleRepair(item.row.Id, item.row.Title, ShortenSidebarTitle(seed, item.row.Cwd, item.row.FirstUserMessage));
@@ -612,12 +666,24 @@ internal sealed class RepairService
     {
         var titles = titleRepairs.ToDictionary(repair => repair.ThreadId, repair => repair.TargetTitle, StringComparer.OrdinalIgnoreCase);
         var timestamps = timestampRepairs.ToDictionary(repair => repair.ThreadId, repair => repair.TargetUpdatedAtMs, StringComparer.OrdinalIgnoreCase);
+        var createdTimestamps = timestampRepairs
+            .Where(repair => repair.TargetCreatedAtMs is not null)
+            .ToDictionary(repair => repair.ThreadId, repair => repair.TargetCreatedAtMs!.Value, StringComparer.OrdinalIgnoreCase);
         return threads.Select(row =>
         {
             var title = titles.TryGetValue(row.Id, out var nextTitle) ? nextTitle : row.Title;
             var updatedMs = timestamps.TryGetValue(row.Id, out var nextMs) ? nextMs : row.UpdatedAtMs;
             var updatedAt = timestamps.TryGetValue(row.Id, out var targetMs) ? targetMs / 1000 : row.UpdatedAt;
-            return row with { Title = title, UpdatedAt = updatedAt, UpdatedAtMs = updatedMs };
+            var createdMs = createdTimestamps.TryGetValue(row.Id, out var nextCreatedMs) ? nextCreatedMs : row.CreatedAtMs;
+            var createdAt = createdTimestamps.TryGetValue(row.Id, out var targetCreatedMs) ? targetCreatedMs / 1000 : row.CreatedAt;
+            return row with
+            {
+                Title = title,
+                UpdatedAt = updatedAt,
+                UpdatedAtMs = updatedMs,
+                CreatedAt = createdAt,
+                CreatedAtMs = createdMs
+            };
         }).ToList();
     }
 
@@ -629,8 +695,18 @@ internal sealed class RepairService
     }
 
     private static List<IndexRepair> ResumeInventory(List<ThreadRow> threads) =>
-        VisibleResumeThreads(threads)
+        threads
+            .Where(row => RolloutExists(row.RolloutPath))
+            .OrderBy(row => row.EffectiveUpdatedAtMs)
+            .ThenBy(row => row.Id, StringComparer.OrdinalIgnoreCase)
             .Select(row => new IndexRepair(row.Id, row.Title, row.EffectiveUpdatedAtMs))
+            .ToList();
+
+    private static List<ThreadRow> ProviderAlignmentThreads(List<ThreadRow> threads) =>
+        threads
+            .Where(row => SidebarSourceKind(row.Source) is not null && RolloutExists(row.RolloutPath))
+            .OrderBy(row => row.EffectiveUpdatedAtMs)
+            .ThenBy(row => row.Id, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
     private static List<ThreadRow> VisibleResumeThreads(List<ThreadRow> threads) =>
@@ -782,6 +858,21 @@ internal sealed class RepairService
         text = Regex.Replace(text, "<appshot\\b[^>]*>.*?</appshot>", " ", RegexOptions.IgnoreCase | RegexOptions.Singleline);
         text = Regex.Replace(text, "\\[([^\\]]{1,120})\\]\\([^)]+\\)", "$1");
         return Regex.Replace(text, "\\s+", " ").Trim();
+    }
+
+    private static bool LooksCorruptedTitle(string value)
+    {
+        string[] markers =
+        [
+            "to=functions.",
+            "to be plain",
+            "need plain text",
+            "not xml",
+            "wait there is extra",
+            "'}]}",
+            "}】"
+        ];
+        return markers.Any(marker => value.Contains(marker, StringComparison.OrdinalIgnoreCase));
     }
 
     private static string ShortenSidebarTitle(string? value, string? cwd, string? firstUserMessage)
@@ -999,13 +1090,6 @@ internal sealed class RepairService
         return reader.ReadToEnd();
     }
 
-    private static byte[] ReadAllBytesShared(string path)
-    {
-        using var stream = OpenSharedRead(path);
-        using var memory = new MemoryStream();
-        stream.CopyTo(memory);
-        return memory.ToArray();
-    }
 }
 
 internal sealed class SqliteDatabase : IDisposable
@@ -1024,15 +1108,24 @@ internal sealed class SqliteDatabase : IDisposable
     {
         var columns = TableColumns("threads");
         var updatedAtMs = columns.Contains("updated_at_ms") ? "updated_at_ms" : "NULL";
+        var createdAt = columns.Contains("created_at") ? "created_at" : "0";
+        var createdAtMs = columns.Contains("created_at_ms") ? "created_at_ms" : "NULL";
+        var recencyAt = columns.Contains("recency_at") ? "recency_at" : "0";
+        var recencyAtMs = columns.Contains("recency_at_ms") ? "recency_at_ms" : "NULL";
         var source = columns.Contains("source") ? "source" : "''";
         var firstUser = columns.Contains("first_user_message") ? "first_user_message" : "''";
         var preview = columns.Contains("preview") ? "preview" : "''";
+        var title = columns.Contains("name") ? "COALESCE(NULLIF(name, ''), title)" : "title";
         var sql = $"""
-            SELECT id, rollout_path, title, model_provider, has_user_event, cwd, thread_source, archived, updated_at
+            SELECT id, rollout_path, {title}, model_provider, has_user_event, cwd, thread_source, archived, updated_at
                  , {updatedAtMs} AS updated_at_ms
                  , {source} AS source
                  , {firstUser} AS first_user_message
                  , {preview} AS preview
+                 , {createdAt} AS created_at
+                 , {createdAtMs} AS created_at_ms
+                 , {recencyAt} AS recency_at
+                 , {recencyAtMs} AS recency_at_ms
             FROM threads
             ORDER BY COALESCE(NULLIF({updatedAtMs}, 0), updated_at * 1000) DESC
             """;
@@ -1053,7 +1146,11 @@ internal sealed class SqliteDatabase : IDisposable
                 NativeSqlite.sqlite3_column_int64(statement.Handle, 8),
                 statement.NullableInt64(9),
                 statement.Text(11),
-                statement.Text(12)));
+                statement.Text(12),
+                NativeSqlite.sqlite3_column_int64(statement.Handle, 13),
+                statement.NullableInt64(14),
+                NativeSqlite.sqlite3_column_int64(statement.Handle, 15),
+                statement.NullableInt64(16)));
         }
         return rows;
     }
@@ -1089,25 +1186,36 @@ internal sealed class SqliteDatabase : IDisposable
         var values = repairs.ToList();
         if (values.Count == 0)
             return;
-        var hasMs = TableColumns("threads").Contains("updated_at_ms");
-        var sql = hasMs ? "UPDATE threads SET updated_at = ?, updated_at_ms = ? WHERE id = ?" : "UPDATE threads SET updated_at = ? WHERE id = ?";
+        var columns = TableColumns("threads");
+        var hasUpdatedAtMs = columns.Contains("updated_at_ms");
+        var hasCreatedAt = columns.Contains("created_at");
+        var hasCreatedAtMs = columns.Contains("created_at_ms");
         Execute("BEGIN IMMEDIATE");
         try
         {
-            using var statement = Prepare(sql);
             foreach (var repair in values)
             {
-                statement.Reset();
-                statement.BindInt64(1, repair.TargetUpdatedAtMs / 1000);
-                if (hasMs)
+                var assignments = new List<string> { "updated_at = ?" };
+                if (hasUpdatedAtMs)
+                    assignments.Add("updated_at_ms = ?");
+                if (repair.TargetCreatedAtMs is not null && hasCreatedAt)
                 {
-                    statement.BindInt64(2, repair.TargetUpdatedAtMs);
-                    statement.BindText(3, repair.ThreadId);
+                    assignments.Add("created_at = ?");
+                    if (hasCreatedAtMs)
+                        assignments.Add("created_at_ms = ?");
                 }
-                else
+                using var statement = Prepare($"UPDATE threads SET {string.Join(", ", assignments)} WHERE id = ?");
+                var index = 1;
+                statement.BindInt64(index++, repair.TargetUpdatedAtMs / 1000);
+                if (hasUpdatedAtMs)
+                    statement.BindInt64(index++, repair.TargetUpdatedAtMs);
+                if (repair.TargetCreatedAtMs is long createdAtMs && hasCreatedAt)
                 {
-                    statement.BindText(2, repair.ThreadId);
+                    statement.BindInt64(index++, createdAtMs / 1000);
+                    if (hasCreatedAtMs)
+                        statement.BindInt64(index++, createdAtMs);
                 }
+                statement.BindText(index, repair.ThreadId);
                 if (NativeSqlite.sqlite3_step(statement.Handle) != NativeSqlite.SQLITE_DONE)
                     throw new InvalidOperationException($"SQLite 更新失败：{ErrorMessage}");
             }
@@ -1125,15 +1233,26 @@ internal sealed class SqliteDatabase : IDisposable
         var values = repairs.ToList();
         if (values.Count == 0)
             return;
+        var hasName = TableColumns("threads").Contains("name");
         Execute("BEGIN IMMEDIATE");
         try
         {
-            using var statement = Prepare("UPDATE threads SET title = ? WHERE id = ?");
+            using var statement = Prepare(hasName
+                ? "UPDATE threads SET title = ?, name = ? WHERE id = ?"
+                : "UPDATE threads SET title = ? WHERE id = ?");
             foreach (var repair in values)
             {
                 statement.Reset();
                 statement.BindText(1, repair.TargetTitle);
-                statement.BindText(2, repair.ThreadId);
+                if (hasName)
+                {
+                    statement.BindText(2, repair.TargetTitle);
+                    statement.BindText(3, repair.ThreadId);
+                }
+                else
+                {
+                    statement.BindText(2, repair.ThreadId);
+                }
                 if (NativeSqlite.sqlite3_step(statement.Handle) != NativeSqlite.SQLITE_DONE)
                     throw new InvalidOperationException($"SQLite 更新失败：{ErrorMessage}");
             }
@@ -1738,11 +1857,18 @@ internal static class SelfTest
             var rolloutDirectory = Path.Combine(root, "sessions", "2026", "06", "01");
             Directory.CreateDirectory(rolloutDirectory);
             var rollout = Path.Combine(rolloutDirectory, "rollout-self-test.jsonl");
+            var archivedRollout = Path.Combine(rolloutDirectory, "rollout-archived-test.jsonl");
             File.WriteAllText(rollout, """
                 {"timestamp":"2026-06-01T12:00:00.000Z","type":"session_meta","payload":{"id":"self-test","model_provider":"openai","cwd":"C:\\work"}}
                 {"timestamp":"2026-06-01T12:05:00.000Z","type":"event_msg","payload":{"message":"keep me"}}
                 """);
+            File.WriteAllText(archivedRollout, """
+                {"timestamp":"2026-06-01T13:00:00.000Z","type":"session_meta","payload":{"id":"archived-test","model_provider":"openai","cwd":"C:\\work"}}
+                {"timestamp":"2026-06-01T13:05:00.000Z","type":"event_msg","payload":{"message":"archived body"}}
+                """);
             File.SetLastWriteTimeUtc(rollout, DateTimeOffset.FromUnixTimeSeconds(1).UtcDateTime);
+            var archivedCreatedMs = DateTimeOffset.Parse("2026-06-01T13:00:00.000Z").ToUnixTimeMilliseconds();
+            var archivedUpdatedMs = DateTimeOffset.Parse("2026-06-01T13:05:00.000Z").ToUnixTimeMilliseconds();
             var state = Path.Combine(root, "state_5.sqlite");
             using (var db = new SqliteDatabase(state, false))
             {
@@ -1761,11 +1887,19 @@ internal static class SelfTest
                         updated_at INTEGER,
                         updated_at_ms INTEGER,
                         first_user_message TEXT,
-                        preview TEXT
+                        preview TEXT,
+                        created_at_ms INTEGER,
+                        recency_at INTEGER,
+                        recency_at_ms INTEGER,
+                        name TEXT
                     )
                     """);
                 db.Execute($"""
-                    INSERT INTO threads VALUES (
+                    INSERT INTO threads (
+                        id, rollout_path, created_at, title, model_provider, has_user_event, cwd, source,
+                        thread_source, archived, updated_at, updated_at_ms, first_user_message, preview,
+                        created_at_ms, recency_at, recency_at_ms, name
+                    ) VALUES (
                         'self-test',
                         '{rollout.Replace("'", "''")}',
                         1,
@@ -1779,7 +1913,35 @@ internal static class SelfTest
                         1,
                         1000,
                         'Self test',
-                        ''
+                        '',
+                        1000,
+                        1,
+                        1000,
+                        NULL
+                    );
+                    INSERT INTO threads (
+                        id, rollout_path, created_at, title, model_provider, has_user_event, cwd, source,
+                        thread_source, archived, updated_at, updated_at_ms, first_user_message, preview,
+                        created_at_ms, recency_at, recency_at_ms, name
+                    ) VALUES (
+                        'archived-test',
+                        '{archivedRollout.Replace("'", "''")}',
+                        {(archivedCreatedMs + 28_800_000) / 1000},
+                        '修改幻灯片大小 Need plain text, not XML',
+                        'openai',
+                        1,
+                        'C:\work',
+                        'vscode',
+                        'user',
+                        1,
+                        {archivedUpdatedMs / 1000},
+                        {archivedUpdatedMs},
+                        '读取os的agent',
+                        '读取os的agent',
+                        {archivedCreatedMs + 28_800_000},
+                        {archivedCreatedMs / 1000},
+                        {archivedCreatedMs},
+                        NULL
                     )
                     """);
             }
@@ -1787,11 +1949,12 @@ internal static class SelfTest
             var service = new RepairService();
             var scan = service.Scan(settings);
             Assert(scan.SqliteProviderUpdates.Count == 1, "SQLite provider repair was not detected.");
-            Assert(scan.SqliteTitleRepairs.Count == 1, "Title repair was not detected.");
-            Assert(scan.SqliteTimestampRepairs.Count == 1, "Timestamp repair was not detected.");
+            Assert(scan.SqliteTitleRepairs.Count == 2, "Active and corrupted archived title repairs were not detected.");
+            Assert(scan.SqliteTimestampRepairs.Count == 2, "Updated-at and created-at repairs were not detected.");
+            Assert(scan.SqliteTimestampRepairs.Any(repair => repair.ThreadId == "archived-test" && repair.TargetCreatedAtMs == archivedCreatedMs), "Archived created_at repair was not detected.");
             Assert(scan.RolloutMtimeRepairs.Count == 1, "Rollout mtime repair was not detected.");
             Assert(scan.RolloutRepairs.Count == 0, "Rollout content should not be rewritten.");
-            Assert(scan.IndexRepairs.Count == 1, "Index repair was not detected.");
+            Assert(scan.IndexRepairs.Count == 2, "Index repair did not retain the archived thread.");
             var backup = service.Repair(scan, settings, BackupMode.Lightweight, true);
             Assert(backup is not null, "Backup was not created.");
             var repaired = service.Scan(settings);
@@ -1806,12 +1969,14 @@ internal static class SelfTest
             {
                 aligned = service.Scan(settings);
             }
-            Assert(aligned.SqliteProviderUpdates.Count == 0, "Provider alignment should not rewrite rows already on the active provider.");
-            Assert(aligned.RolloutRepairs.Count == 1, "Provider alignment rollout repair was not detected.");
+            Assert(aligned.SqliteProviderUpdates.Count == 1, "Provider alignment did not include the archived thread.");
+            Assert(aligned.RolloutRepairs.Count == 2, "Provider alignment did not include active and archived rollouts.");
             var alignedBackup = service.Repair(aligned, settings, BackupMode.Lightweight, true);
             Assert(alignedBackup is not null, "Provider alignment backup was not created.");
             Assert(File.ReadAllText(rollout).Contains("\"model_provider\":\"custom\""), "Rollout provider was not aligned to custom.");
             Assert(File.ReadAllText(rollout).Contains("\"message\":\"keep me\""), "Rollout body changed unexpectedly during provider alignment.");
+            Assert(File.ReadAllText(archivedRollout).Contains("\"model_provider\":\"custom\""), "Archived rollout provider was not aligned to custom.");
+            Assert(File.ReadAllText(archivedRollout).Contains("\"message\":\"archived body\""), "Archived rollout body changed unexpectedly.");
 
             var migratedRoot = Path.Combine(root, "migrated-sqlite-home");
             Directory.CreateDirectory(migratedRoot);
@@ -1830,6 +1995,10 @@ internal static class SelfTest
             var migratedScan = service.Scan(new AppSettings { CodexHome = migratedRoot, OpenCodexAfterRepair = false });
             Assert(Path.GetFullPath(migratedScan.SqliteHome) == Path.GetFullPath(nestedSqliteHome), "Migrated sqlite home was not preferred over stale root database.");
             Assert(migratedScan.Threads.Count == 1 && migratedScan.Threads[0].Id == "active-nested", "Scan used the stale root state database instead of the active sqlite directory.");
+            File.SetLastWriteTimeUtc(Path.Combine(migratedRoot, "state_5.sqlite"), DateTime.UtcNow.AddMinutes(1));
+            var rootActiveScan = service.Scan(new AppSettings { CodexHome = migratedRoot, OpenCodexAfterRepair = false });
+            Assert(Path.GetFullPath(rootActiveScan.SqliteHome) == Path.GetFullPath(migratedRoot), "A newer root state database was ignored.");
+            Assert(rootActiveScan.Threads.Count == 1 && rootActiveScan.Threads[0].Id == "stale-root", "Scan did not switch back to the newer root state database.");
             Console.WriteLine("Codex Synced Windows self-test passed.");
             return 0;
         }

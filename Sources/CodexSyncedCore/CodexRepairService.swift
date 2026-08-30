@@ -173,7 +173,7 @@ public final class CodexRepairService {
         }
         let states = files.filter { $0.lastPathComponent.hasPrefix("state_") && $0.pathExtension == "sqlite" }
         return states.compactMap { url in
-            let modifiedAt = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            let modifiedAt = CodexPathResolver.stateDatabaseActivityDate(url)
             return StateDatabase(url: url, modifiedAt: modifiedAt)
         }
         .sorted { $0.modifiedAt > $1.modifiedAt }

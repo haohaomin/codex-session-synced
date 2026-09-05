@@ -8,6 +8,23 @@ Codex Synced 是一个 Windows / macOS 本地修复工具，用来解决 Codex D
 
 它不是云同步工具，也不会上传你的会话。所有扫描、备份、修复都发生在本机。
 
+## 1.3.0 更新内容
+
+相较于 1.2.7，本版本新增以下修复和兼容性改进：
+
+- **修正状态库选择**：同时检查 `.codex` 根目录与 `sqlite` 子目录，结合数据库及 WAL/SHM 修改时间选择状态库，避免旧的子目录数据库遮蔽根目录中的活跃数据库。
+- **补齐归档会话的 Provider 对齐**：将已归档的普通会话也纳入对齐范围，同步更新 SQLite 和 rollout 首行 metadata，修复切换 Provider 后归档历史不可见的问题。
+- **重建索引时保留更多记录**：`session_index.jsonl` 重建覆盖具有本地 rollout 文件的归档会话和内部线程，避免遗漏这些记录，并保持 ID 唯一。
+- **兼容新版标题字段**：优先读取非空的 `threads.name`，修复标题时同步更新 `name` 与 `title`。
+- **恢复损坏标题**：识别生成标题中的工具调用残片，从会话预览或首条用户消息恢复标题。
+- **修正创建时间异常**：检测 `created_at > updated_at` 的记录，利用 rollout 时间及可用的 recency 时间修正创建时间，支持秒和毫秒字段。
+- **降低首行改写的内存占用**：流式替换 rollout 首行，保留后续消息正文，避免改写时将整个大型会话载入内存。
+- **提高 macOS 打包稳定性**：将 DMG 的 Finder 布局超时延长至 300 秒。
+
+本次还补充了状态库选择、归档会话、损坏标题、创建时间及索引保留场景的回归测试。Windows 自测与双平台发布构建已通过。
+
+[完整更新说明](docs/release/v1.3.0.md) · [下载 1.3.0](https://github.com/renhao12356578/codex-session-synced/releases/tag/v1.3.0)
+
 ![Codex Synced 首页](docs/screenshots/home-zh.png)
 
 ## Windows 下载与使用

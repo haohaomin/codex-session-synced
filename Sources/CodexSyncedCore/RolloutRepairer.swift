@@ -11,6 +11,11 @@ enum RolloutRepairer {
             return nil
         }
 
+        // Descendants store byte offsets into parents. Even metadata rewrites can
+        // invalidate those offsets; paginated files must remain byte-for-byte intact.
+        guard payload["history_mode"] as? String != "paginated",
+              payload["history_base"] == nil, object["ordinal"] == nil else { return nil }
+
         let current = payload["model_provider"] as? String
         guard current != targetProvider else { return nil }
         payload["model_provider"] = targetProvider

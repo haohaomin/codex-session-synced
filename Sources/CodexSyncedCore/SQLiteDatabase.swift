@@ -18,16 +18,142 @@ enum SQLiteError: LocalizedError {
 final class SQLiteDatabase {
     private var handle: OpaquePointer?
 
-    init(path: String, readonly: Bool) throws {
-        let flags = readonly ? SQLITE_OPEN_READONLY : (SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE)
+    init(path: String, readonly: Bool, create: Bool = true) throws {
+        let flags = readonly ? SQLITE_OPEN_READONLY : (SQLITE_OPEN_READWRITE | (create ? SQLITE_OPEN_CREATE : 0))
         if sqlite3_open_v2(path, &handle, flags, nil) != SQLITE_OK {
             let message = handle.map { String(cString: sqlite3_errmsg($0)) } ?? "unknown"
+            sqlite3_close(handle)
+            handle = nil
             throw SQLiteError.openFailed(message)
         }
     }
 
     deinit {
         sqlite3_close(handle)
+    }
+
+    // SQLite's backup API includes committed WAL pages. Never copy a live .sqlite alone.
+    func backup(to url: URL) throws {
+        guard !FileManager.default.fileExists(atPath: url.path) else {
+            throw SQLiteError.stepFailed("Backup destination already exists")
+        }
+        let destination = try SQLiteDatabase(path: url.path, readonly: false)
+        guard let backup = sqlite3_backup_init(destination.handle, "main", handle, "main") else {
+            throw SQLiteError.stepFailed(destination.errorMessage)
+        }
+        var result: Int32 = SQLITE_OK
+        var retries = 0
+        let deadline = Date().addingTimeInterval(30)
+        repeat {
+            result = sqlite3_backup_step(backup, 256)
+            if result == SQLITE_BUSY || result == SQLITE_LOCKED {
+                retries += 1
+                sqlite3_sleep(20)
+            }
+        } while Date() < deadline && (result == SQLITE_OK || ((result == SQLITE_BUSY || result == SQLITE_LOCKED) && retries < 50))
+        let finish = sqlite3_backup_finish(backup)
+        guard result == SQLITE_DONE, finish == SQLITE_OK else {
+            throw SQLiteError.stepFailed("SQLite backup did not complete")
+        }
+        try destination.checkIntegrity()
+    }
+
+    func checkIntegrity() throws {
+        guard try stringRows("PRAGMA integrity_check") == [["ok"]] else {
+            throw SQLiteError.stepFailed("SQLite integrity check failed")
+        }
+    }
+
+    /// Preserve every column (including NULL and storage type), not only known metadata.
+    func entrypointRows() throws -> [EntrypointRow] {
+        guard try tableColumns("threads").isSuperset(of: ["id", "rollout_path", "title", "history_mode"]) else {
+            throw HistoryRepairError.unsafe("Unsupported threads schema / 不支持的 threads 结构")
+        }
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, "SELECT * FROM threads ORDER BY id", -1, &statement, nil) == SQLITE_OK else {
+            throw SQLiteError.prepareFailed(errorMessage)
+        }
+        defer { sqlite3_finalize(statement) }
+        var rows: [EntrypointRow] = []
+        var step = sqlite3_step(statement)
+        while step == SQLITE_ROW {
+            var fields: [String: SQLiteField] = [:]
+            for index in 0..<sqlite3_column_count(statement) {
+                let name = String(cString: sqlite3_column_name(statement, index))
+                let type = sqlite3_column_type(statement, index)
+                let value: String
+                if type == SQLITE_BLOB {
+                    let count = Int(sqlite3_column_bytes(statement, index))
+                    value = sqlite3_column_blob(statement, index).map { Data(bytes: $0, count: count).base64EncodedString() } ?? ""
+                } else if type == SQLITE_TEXT, let bytes = sqlite3_column_text(statement, index) {
+                    let data = Data(bytes: bytes, count: Int(sqlite3_column_bytes(statement, index)))
+                    guard let decoded = String(data: data, encoding: .utf8) else {
+                        throw HistoryRepairError.unsafe("Non-UTF8 SQLite text requires manual review")
+                    }
+                    value = decoded
+                } else {
+                    value = text(statement, index)
+                }
+                fields[name] = SQLiteField(type: type, value: value)
+            }
+            rows.append(EntrypointRow(fields: fields))
+            step = sqlite3_step(statement)
+        }
+        guard step == SQLITE_DONE else { throw SQLiteError.stepFailed(errorMessage) }
+        return rows
+    }
+
+    /// Compare-and-swap in one transaction; a rollback never replaces an entire database.
+    func changeEntrypoint(expected: EntrypointRow, to path: String, validate: () throws -> Void) throws -> EntrypointRow {
+        try execute("BEGIN IMMEDIATE")
+        do {
+            guard try stringRows("SELECT name FROM sqlite_master WHERE type = 'trigger'").isEmpty else {
+                throw HistoryRepairError.unsafe("Database has triggers; manual review required / 数据库存在触发器，需人工检查")
+            }
+            guard try entrypointRows().first(where: { $0.id == expected.id }) == expected else {
+                throw HistoryRepairError.stale
+            }
+            try validate()
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(handle, "UPDATE threads SET rollout_path = ? WHERE id = ? AND rollout_path = ?", -1, &statement, nil) == SQLITE_OK else {
+                throw SQLiteError.prepareFailed(errorMessage)
+            }
+            defer { sqlite3_finalize(statement) }
+            bind(path, to: statement, index: 1)
+            bind(expected.id, to: statement, index: 2)
+            bind(expected.path, to: statement, index: 3)
+            guard sqlite3_step(statement) == SQLITE_DONE, sqlite3_changes(handle) == 1 else {
+                throw SQLiteError.stepFailed("Entrypoint update failed")
+            }
+            var desired = expected
+            desired.fields["rollout_path"] = SQLiteField(type: SQLITE_TEXT, value: path)
+            guard try entrypointRows().first(where: { $0.id == expected.id }) == desired else {
+                throw HistoryRepairError.unsafe("Metadata changed unexpectedly / 元数据校验失败")
+            }
+            try validate()
+            try checkIntegrity()
+            try execute("COMMIT")
+            return desired
+        } catch {
+            try? execute("ROLLBACK")
+            throw error
+        }
+    }
+
+    private func stringRows(_ sql: String) throws -> [[String]] {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+            throw SQLiteError.prepareFailed(errorMessage)
+        }
+        defer { sqlite3_finalize(statement) }
+        var result: [[String]] = []
+        var step = sqlite3_step(statement)
+        while step == SQLITE_ROW {
+            result.append((0..<sqlite3_column_count(statement)).map { text(statement, $0) })
+            step = sqlite3_step(statement)
+        }
+        guard step == SQLITE_DONE else { throw SQLiteError.stepFailed(errorMessage) }
+        return result
     }
 
     func queryThreads() throws -> [ThreadRow] {

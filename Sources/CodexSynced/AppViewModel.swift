@@ -28,6 +28,10 @@ final class AppViewModel: ObservableObject {
         didSet {
             settings.save()
             l10n = L10n(language: settings.language)
+            if oldValue.codexHome != settings.codexHome || oldValue.sqliteHome != settings.sqliteHome {
+                historyScan = nil
+                historyRecords = []
+            }
         }
     }
     @Published var l10n: L10n
@@ -41,6 +45,9 @@ final class AppViewModel: ObservableObject {
     @Published var notice: AppNotice?
     @Published var lastScanAt: Date?
     @Published var progress: OperationProgress?
+    @Published var historyScan: HistoryScan?
+    @Published var historyRecords: [HistoryRepairRecord] = []
+    @Published var historyMessage: String?
 
     let service = CodexRepairService()
     private var dismissNoticeTask: Task<Void, Never>?
@@ -54,6 +61,7 @@ final class AppViewModel: ObservableObject {
     }
 
     func scan(showFeedback: Bool = true) async {
+        guard !isBusy else { return }
         status = .scanning
         setProgress(
             title: l10n.text("识别当前环境", "Detecting environment"),
@@ -111,6 +119,7 @@ final class AppViewModel: ObservableObject {
     }
 
     func repairNow() async {
+        guard !isBusy else { return }
         guard let scanResult else {
             status = .failed(CodexRepairError.noScanResult.localizedDescription)
             return
@@ -172,6 +181,7 @@ final class AppViewModel: ObservableObject {
     }
 
     func restore(_ backup: BackupRecord) async {
+        guard !isBusy else { return }
         do {
             status = .repairing(l10n.text("正在恢复备份", "Restoring backup"))
             setProgress(
@@ -253,6 +263,71 @@ final class AppViewModel: ObservableObject {
         notice = nil
     }
 
+    func scanHistory() async {
+        guard !isBusy else { return }
+        status = .scanning
+        historyScan = nil
+        historyMessage = nil
+        let captured = settings
+        do {
+            let (result, records) = try await Task.detached(priority: .userInitiated) {
+                let service = HistoryRepairService()
+                return (try service.scan(settings: captured), try service.records(settings: captured))
+            }.value
+            guard captured.codexHome == settings.codexHome, captured.sqliteHome == settings.sqliteHome else {
+                throw HistoryRepairError.stale
+            }
+            historyScan = result
+            historyRecords = records
+            status = .ready
+        } catch {
+            status = .failed(error.localizedDescription)
+            historyMessage = error.localizedDescription
+        }
+    }
+
+    func repairHistory(_ diagnosis: HistoryDiagnosis) async {
+        guard !isBusy, let scan = historyScan else { return }
+        status = .repairing("Entrypoint")
+        let captured = settings
+        do {
+            _ = try await Task.detached(priority: .userInitiated) {
+                try HistoryRepairService().repair(diagnosis, scan: scan, settings: captured)
+            }.value
+            status = .ready
+            await scanHistory()
+            let rescanFailure = historyMessage
+            historyMessage = l10n.text(
+                "入口已修复：数据库副本试写、所有字段与原文件 SHA-256 校验通过。尚未验证客户端逐条读取；请重新打开对话，再正常退出并重启 Codex 检查。",
+                "Entrypoint repaired: database-copy trial, metadata and source SHA-256 checks passed. Client message-by-message reading is NOT verified. Reopen the chat, then quit and restart Codex to check persistence.")
+            if let rescanFailure { historyMessage? += "\n" + rescanFailure }
+            scanResult = nil
+        } catch {
+            status = .failed(error.localizedDescription)
+            historyMessage = error.localizedDescription
+        }
+    }
+
+    func rollbackHistory(_ record: HistoryRepairRecord) async {
+        guard !isBusy else { return }
+        status = .repairing("Rollback")
+        let captured = settings
+        do {
+            try await Task.detached(priority: .userInitiated) {
+                try HistoryRepairService().rollback(record, settings: captured)
+            }.value
+            status = .ready
+            await scanHistory()
+            let rescanFailure = historyMessage
+            historyMessage = l10n.text("仅本次入口修改已撤销，未覆盖其他会话或整库。", "Only this entrypoint change was reverted; other chats and the database were not replaced.")
+            if let rescanFailure { historyMessage? += "\n" + rescanFailure }
+            scanResult = nil
+        } catch {
+            status = .failed(error.localizedDescription)
+            historyMessage = error.localizedDescription
+        }
+    }
+
     private func setProgress(title: String, detail: String, fraction: Double?) {
         progress = OperationProgress(title: title, detail: detail, fraction: fraction)
     }
@@ -279,6 +354,7 @@ final class AppViewModel: ObservableObject {
 enum AppSection: String, CaseIterable, Identifiable {
     case home
     case pending
+    case history
     case backups
     case settings
 

@@ -78,6 +78,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Run isolated Swift tests
+        run: swift test
+
       - name: Package macOS DMG
         run: bash scripts/package-dmg.sh "$VERSION"
 
@@ -113,18 +116,8 @@ jobs:
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release edit "$TAG" --title "Codex Synced $VERSION" --notes-file "$notes_file"
           else
-            gh release create "$TAG" --target main --title "Codex Synced $VERSION" --notes-file "$notes_file"
+            gh release create "$TAG" --target "$GITHUB_SHA" --draft --title "Codex Synced $VERSION" --notes-file "$notes_file"
           fi
 
-          while IFS= read -r asset; do
-            case "$asset" in
-              Codex-Synced-Windows-x64-*.msi|Codex-Synced-Windows-x64-*.zip|Codex-Synced-macOS-*.dmg)
-                case "$asset" in
-                  *-"$VERSION".msi|*-"$VERSION".zip|*-"$VERSION".dmg) ;;
-                  *) gh release delete-asset "$TAG" "$asset" --yes ;;
-                esac
-                ;;
-            esac
-          done < <(gh release view "$TAG" --json assets --jq '.assets[].name')
-
           gh release upload "$TAG" artifacts/* --clobber
+          gh release edit "$TAG" --draft=false --latest

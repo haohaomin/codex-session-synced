@@ -48,6 +48,8 @@ struct MainView: View {
             HomeView()
         case .pending:
             PendingRepairsView()
+        case .history:
+            HistoryRepairView()
         case .backups:
             BackupsView()
         case .settings:
@@ -83,6 +85,7 @@ struct Sidebar: View {
             VStack(spacing: 6) {
                 item(.home, "house", viewModel.l10n.text("首页", "Home"))
                 item(.pending, "list.bullet.rectangle", viewModel.l10n.text("待修复项", "Pending"))
+                item(.history, "text.bubble", viewModel.l10n.text("对话修复", "Chat Repair"))
                 item(.backups, "externaldrive", viewModel.l10n.text("备份", "Backups"))
                 item(.settings, "gearshape", viewModel.l10n.text("设置", "Settings"))
             }

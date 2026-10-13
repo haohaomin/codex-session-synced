@@ -1,4 +1,5 @@
 import Foundation
+import SQLite3
 import Testing
 @testable import CodexSyncedCore
 
@@ -188,6 +189,35 @@ struct CodexSyncedCoreTests {
         #expect(content.contains("\"text\":\"keep me\""))
     }
 
+    @Test func paginatedProviderMismatchIsReportedWithoutRolloutRewrite() throws {
+        let directory = try makeTempDirectory()
+        let rollout = directory.appendingPathComponent("rollout-paginated-provider.jsonl")
+        try """
+        {"ordinal":0,"type":"session_meta","payload":{"id":"paginated-provider","history_mode":"paginated","model_provider":"openai"}}
+        {"ordinal":1,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"keep me"}]}}
+        """.write(to: rollout, atomically: true, encoding: .utf8)
+
+        let thread = makeThread(
+            id: "paginated-provider",
+            rollout: rollout,
+            title: "Paginated provider",
+            provider: "custom",
+            cwd: directory.path,
+            firstUserMessage: "keep me"
+        )
+        let info = SidebarRepairPlanner.rolloutInfoByPath(for: [thread])
+        let warnings = SidebarRepairPlanner.paginatedProviderWarnings(
+            threads: [thread],
+            rollouts: info,
+            targetProvider: "custom"
+        )
+
+        #expect(warnings.count == 1)
+        #expect(warnings.first?.currentProvider == "openai")
+        #expect(warnings.first?.targetProvider == "custom")
+        #expect(RolloutRepairer.makeRepair(url: rollout, targetProvider: "custom") == nil)
+    }
+
     @Test func titleRepairRemovesToolSyntaxAndUsesConversationPreview() throws {
         let directory = try makeTempDirectory()
         let rollout = directory.appendingPathComponent("rollout-title.jsonl")
@@ -209,6 +239,36 @@ struct CodexSyncedCoreTests {
         #expect(repairs.count == 1)
         #expect(repairs.first?.targetTitle.contains("functions.exec") == false)
         #expect(repairs.first?.targetTitle.hasPrefix("读取os的agent") == true)
+    }
+
+    @Test func lightweightBackupStoresConsistentSnapshotsForSQLiteDatabases() throws {
+        let directory = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let state = directory.appendingPathComponent("state_5.sqlite")
+        var handle: OpaquePointer?
+        #expect(sqlite3_open(state.path, &handle) == SQLITE_OK)
+        defer { sqlite3_close(handle) }
+        #expect(sqlite3_exec(handle, "CREATE TABLE threads(id TEXT, rollout_path TEXT, title TEXT, model_provider TEXT, has_user_event INTEGER, cwd TEXT, thread_source TEXT, archived INTEGER, updated_at INTEGER); INSERT INTO threads VALUES('id','/tmp/rollout.jsonl','title','custom',1,'/tmp','user',0,1);", nil, nil, nil) == SQLITE_OK)
+
+        let now = Date()
+        let scan = ScanResult(
+            providerInfo: ProviderInfo(provider: "custom", authLabel: "Custom", configURL: directory.appendingPathComponent("config.toml")),
+            stateDatabase: StateDatabase(url: state, modifiedAt: now),
+            threads: [], sqliteProviderUpdates: [], sqliteCompatibilityUpdates: [], rolloutRepairs: [], indexRepairs: [],
+            sqliteTimestampRepairs: [], sqliteTitleRepairs: [], rolloutMtimeRepairs: [], globalStateRepair: nil,
+            backups: [], codexHome: directory, sqliteHome: directory, lastRepairAt: nil
+        )
+        let record = try CodexRepairService().createBackup(
+            scan: scan,
+            settings: AppSettings(language: .en, codexHome: directory, sqliteHome: directory, defaultBackupMode: .lightweight, lightweightLimit: 5, fullLimit: 3, openCodexAfterRepair: false),
+            mode: .lightweight
+        )
+        let manifestData = try Data(contentsOf: URL(fileURLWithPath: record.path).appendingPathComponent("manifest.json"))
+        let manifest = try JSONDecoder.codexSynced.decode(BackupManifest.self, from: manifestData)
+        let snapshot = try #require(manifest.sqliteSnapshots?.first)
+        let snapshotURL = URL(fileURLWithPath: record.path).appendingPathComponent(snapshot.backupRelativePath)
+        try SQLiteDatabase(path: snapshotURL.path, readonly: true).checkIntegrity()
+        #expect(manifest.files.map { URL(fileURLWithPath: $0.originalPath).standardizedFileURL.path }.contains(state.standardizedFileURL.path))
     }
 
     @Test func timestampRepairCorrectsCreatedAtAheadOfConversation() throws {

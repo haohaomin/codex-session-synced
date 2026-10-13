@@ -2,11 +2,22 @@
 
 English | [中文](README.md)
 
+## 1.5.0: Provider-Switch Diagnostics & Safe Backups
+
+This release unifies provider-switch visibility repair, paginated-risk warnings, and backup boundaries into one **diagnose → preview → back up → verify** workflow. Paginated rollout headers are still never rewritten silently; cases requiring `history_base` recalculation stop for manual review.
+
+[1.5.0 release notes](docs/release/v1.5.0-en.md) · [Download 1.5.0](https://github.com/renhao12356578/codex-session-synced/releases/tag/v1.5.0)
+
+- **Layered provider safety**: legacy-format threads remain eligible for safe alignment; paginated Provider mismatches are shown separately and are not presented as body repairs.
+- **WAL-consistent backups**: lightweight backups retain live SQLite/WAL/SHM files and create SQLite Backup API snapshots for present `state_*`, `thread_history_*`, and `logs_*` databases.
+- **Scoped unknown-file blocking**: temporary, repair, and backup artifacts are ignored; an unrecognized rollout only blocks chats in its own directory.
+- **Unified risk UI**: the pending-repair and chat-repair pages now use the same status, risk, and verification-boundary cards.
+
 ## 1.4.0: Chat Diagnosis & Entrypoint Repair (experimental, macOS)
 
 The new **Chat Repair** page addresses paginated chats whose JSONL files still exist but whose logical thread points to an older branch. It is separate from sidebar repair and available in macOS 1.4.0 only. Windows 1.4.0 retains its existing functionality without the new entrypoint repair.
 
-[1.4.0 release notes](docs/release/v1.4.0-en.md) · [Download 1.4.0](https://github.com/renhao12356578/codex-session-synced/releases/tag/v1.4.0)
+[1.4.0 release notes](docs/release/v1.4.0-en.md)
 
 - Read-only scanning follows the original `history_base` chain, distinguishing logical thread IDs from physical branch IDs. It never selects a tip by modification time.
 - Ambiguous tips, cycles, duplicate physical IDs, missing parents, malformed JSON, ordinal gaps, byte-boundary mismatches, symlinks and unknown formats block automatic repair. Counts cover message records within effective inheritance boundaries, not client turns.
@@ -14,18 +25,19 @@ The new **Chat Repair** page addresses paginated chats whose JSONL files still e
 - SQLite Backup API captures committed WAL pages. Original branch files are copied too. The update is trialled on a database copy before a checked transaction touches the live database. Stale previews are rejected.
 - Rollback reverses only that entrypoint, never restores the whole database. Changed metadata, files or branches block rollback to protect subsequent activity. Records live in `history-entrypoint-backups/` under the selected Codex Home and are not auto-pruned. A durable record is written before commit and can represent an uncommitted attempt, not proof of success.
 - The macOS sidebar Provider repair now leaves JSONL headers containing `history_mode: paginated`, `history_base` or `ordinal` untouched, protecting inherited byte offsets. Legacy-format Provider repair is unchanged.
+- **Paginated Provider warnings**: scans show SQLite/rollout Provider mismatches in paginated threads as review items instead of presenting them as completed history repairs.
 
 Choose **Chat Repair → Read-only Scan**, review the current and proposed paths, quit Codex, then confirm **Back Up & Repair Entrypoint**. The selected SQLite directory must contain exactly one `state_*.sqlite`; configure paths in Settings when necessary. Anomalies require manual investigation, with no force-repair option.
 
 **Verification boundary:** automated checks cover source-file SHA-256 preservation, ordinal and byte-boundary consistency, preservation of every non-entrypoint SQLite field and database integrity. The copy trial tests the database change, **not isolated client `thread/read` / paginated message-body equivalence or desktop restart persistence**. Reopen the original chat, compare content/order/missing or duplicate messages, then quit and restart Codex to verify persistence and project association. “Entrypoint repaired” does not mean full conversation acceptance. Offset anomalies, including a 50-byte discrepancy, are reported without modification.
 
-Backups contain private conversations and database metadata. Protect them like the originals. Untouched history/log databases are not backed up, and no atomic cross-database snapshot is claimed. Regression tests use isolated temporary fixtures covering edited replacements, metadata and source preservation, WAL backup, stale previews, broken/ambiguous branches, invalid offsets, transaction rollback and protection of later changes.
+Backups contain private conversations and database metadata. Protect them like the originals. Present state, history, and log databases receive WAL-consistent snapshots, but no atomic cross-database transaction is claimed. Regression tests use isolated temporary fixtures covering edited replacements, metadata and source preservation, WAL backup, scoped unknown files, stale previews, broken/ambiguous branches, invalid offsets, transaction rollback and protection of later changes.
 
 See the [implementation and validation record](docs/history-repair-validation.md) (Chinese) for build commands and outstanding acceptance checks.
 
 Codex Synced is a local Windows / macOS repair tool for Codex Desktop conversation history. It helps when conversations still exist on disk but disappear from the sidebar, show up as untitled "New conversation" rows, or sort with incorrect timestamps.
 
-Codex Synced previews the local records that need repair, creates a backup, and repairs sidebar summary data in SQLite, `session_index.jsonl`, rollout file mtimes, and `.codex-global-state.json`. By default, recoverable interactive threads, including archived threads, and their rollout metadata are aligned to the root-level active `model_provider`. This restores history hidden after switching between OpenAI and custom providers. Cross-provider alignment can be disabled to use rollout metadata only as the SQLite source of truth.
+Codex Synced previews the local records that need repair, creates a backup, and repairs sidebar summary data in SQLite, `session_index.jsonl`, rollout file mtimes, and `.codex-global-state.json`. By default, recoverable interactive threads, including archived threads, and rollout metadata that can be safely rewritten are aligned to the root-level active `model_provider`. This restores history hidden after switching between OpenAI and custom providers. Provider mismatches in paginated rollouts are shown as a separate review item and are not rewritten before their `history_base` byte boundaries are recalculated. Cross-provider alignment can be disabled to use rollout metadata only as the SQLite source of truth.
 
 ## What's New in 1.3.0
 
@@ -46,17 +58,17 @@ Regression coverage was also added for database selection, archived threads, cor
 
 ## Windows Download and Usage
 
-1. Download `Codex-Synced-Windows-x64-1.4.0.msi` from the [latest GitHub Release](https://github.com/renhao12356578/codex-session-synced/releases/latest).
+1. Download `Codex-Synced-Windows-x64-1.5.0.msi` from the [latest GitHub Release](https://github.com/renhao12356578/codex-session-synced/releases/latest).
 2. Quit Codex.
 3. Install the MSI, then open `Codex Synced` from the Start menu.
 4. Review pending changes, choose a backup mode, then apply the repair.
 5. Reopen Codex and verify that local history is visible.
 
-The Windows build is a full desktop app installer. It defaults to `%USERPROFILE%\.codex`, automatically detects the active state database directory, and the directory can be changed in settings. The Release also includes `Codex-Synced-Windows-x64-1.4.0.zip` for users who prefer a manually extracted app directory.
+The Windows build is a full desktop app installer. It defaults to `%USERPROFILE%\.codex`, automatically detects the active state database directory, and the directory can be changed in settings. The Release also includes `Codex-Synced-Windows-x64-1.5.0.zip` for users who prefer a manually extracted app directory.
 
 ## macOS Download and Install
 
-1. Download `Codex-Synced-macOS-1.4.0.dmg` from the [latest GitHub Release](https://github.com/renhao12356578/codex-session-synced/releases/latest).
+1. Download `Codex-Synced-macOS-1.5.0.dmg` from the [latest GitHub Release](https://github.com/renhao12356578/codex-session-synced/releases/latest).
 2. Open the DMG.
 3. Drag `Codex Synced.app` into `Applications`.
 4. On first launch, if macOS blocks the app, right-click it in Finder, choose `Open`, and confirm.

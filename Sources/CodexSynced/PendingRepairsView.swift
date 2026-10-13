@@ -29,6 +29,7 @@ struct PendingRepairsView: View {
                 row(viewModel.l10n.text("待对齐 rollout Provider", "Rollout providers to align"), "\(viewModel.scanResult?.rolloutRepairs.count ?? 0)")
                 row(viewModel.l10n.text("待写入短标题", "Sidebar title rows"), "\(viewModel.scanResult?.sqliteTitleRepairs.count ?? 0)")
                 row(viewModel.l10n.text("待修复更新时间", "Timestamp rows"), "\((viewModel.scanResult?.sqliteTimestampRepairs.count ?? 0) + (viewModel.scanResult?.rolloutMtimeRepairs.count ?? 0))")
+                row(viewModel.l10n.text("分页 Provider 需确认", "Paginated Provider review"), "\(viewModel.scanResult?.paginatedProviderWarnings.count ?? 0)")
                 row(viewModel.l10n.text("待重建索引条目", "Index entries to rebuild"), "\(viewModel.scanResult?.indexRepairs.count ?? 0)")
                 row(viewModel.l10n.text("全局 UI 状态变更", "Global UI state changes"), "\(viewModel.scanResult?.globalStateRepair?.changes.count ?? 0)", last: true)
             }
@@ -124,8 +125,12 @@ struct PendingRepairsView: View {
                             .font(.system(size: 12))
                             .foregroundStyle(DS.muted)
                     }
+                    warningRows(result: result)
                 } else {
-                    EmptyState(
+                    if let result = viewModel.scanResult, !result.paginatedProviderWarnings.isEmpty {
+                        warningRows(result: result)
+                    } else {
+                        EmptyState(
                         image: "checkmark.circle",
                         title: viewModel.l10n.text("当前没有待修复项", "No pending repairs"),
                         message: viewModel.l10n.text("侧边栏会话摘要状态正常。", "Sidebar conversation summaries look healthy."),
@@ -134,8 +139,35 @@ struct PendingRepairsView: View {
                     ) {
                         Task { await viewModel.scan() }
                     }
+                    }
                 }
             }
+        }
+    }
+
+    @ViewBuilder
+    private func warningRows(result: ScanResult) -> some View {
+        if !result.paginatedProviderWarnings.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                RepairRiskCard(
+                    tone: .warning,
+                    title: viewModel.l10n.text("分页会话需要单独确认", "Paginated threads need separate review"),
+                    message: viewModel.l10n.text("当前版本不会直接改写分页 rollout 首行，因为这可能改变 history_base 字节边界；SQLite Provider 对齐不会被冒充为正文修复。", "This version does not rewrite paginated rollout headers because that can change history_base byte boundaries; SQLite alignment is not presented as a body repair.")
+                )
+                ForEach(result.paginatedProviderWarnings.prefix(10)) { warning in
+                    HStack(spacing: 10) {
+                        Image(systemName: "exclamationmark.triangle")
+                            .foregroundStyle(.orange)
+                        Text(displayTitle(warning.title, fallback: warning.threadID))
+                            .lineLimit(1)
+                        Spacer()
+                        Text("\(warning.currentProvider) -> \(warning.targetProvider)")
+                            .font(.system(size: 12, design: .monospaced))
+                            .foregroundStyle(DS.muted)
+                    }
+                }
+            }
+            .padding(.top, 8)
         }
     }
 
@@ -207,6 +239,15 @@ struct PendingRepairsView: View {
                 kind: "mtime",
                 title: displayTitle($0.title, fallback: $0.threadID),
                 detail: "\($0.currentMtimeMs) -> \($0.targetMtimeMs)"
+            )
+        }
+        items += result.paginatedProviderWarnings.map {
+            PreviewItem(
+                id: "paginated-provider-\($0.threadID)",
+                icon: "exclamationmark.triangle",
+                kind: viewModel.l10n.text("需确认", "Review"),
+                title: displayTitle($0.title, fallback: $0.threadID),
+                detail: viewModel.l10n.text("分页 rollout：\($0.currentProvider) -> \($0.targetProvider)", "Paginated rollout: \($0.currentProvider) -> \($0.targetProvider)")
             )
         }
         items += result.indexRepairs.prefix(1).map {

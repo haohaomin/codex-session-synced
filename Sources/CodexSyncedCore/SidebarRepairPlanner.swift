@@ -5,6 +5,7 @@ enum SidebarRepairPlanner {
 
     struct RolloutInfo {
         var provider: String?
+        var historyMode: String?
         var firstTimestampMs: Int64?
         var lastTimestampMs: Int64?
     }
@@ -41,6 +42,26 @@ enum SidebarRepairPlanner {
         return providerAlignmentThreads(threads).compactMap { thread in
             guard seen.insert(thread.rolloutPath).inserted else { return nil }
             return RolloutRepairer.makeRepair(url: URL(fileURLWithPath: thread.rolloutPath), targetProvider: targetProvider)
+        }
+    }
+
+    static func paginatedProviderWarnings(threads: [ThreadRow], rollouts: [String: RolloutInfo], targetProvider: String) -> [PaginatedProviderWarning] {
+        guard !targetProvider.isEmpty else { return [] }
+        return providerAlignmentThreads(threads).compactMap { thread in
+            guard let info = rollouts[thread.rolloutPath],
+                  info.historyMode == "paginated",
+                  let provider = info.provider,
+                  !provider.isEmpty,
+                  provider != targetProvider else {
+                return nil
+            }
+            return PaginatedProviderWarning(
+                threadID: thread.id,
+                title: thread.title,
+                rolloutPath: thread.rolloutPath,
+                currentProvider: provider,
+                targetProvider: targetProvider
+            )
         }
     }
 
@@ -312,6 +333,7 @@ enum SidebarRepairPlanner {
             return RolloutInfo()
         }
         var provider: String?
+        var historyMode: String?
         var firstTimestampMs: Int64?
         var lastTimestampMs: Int64?
         for line in content.components(separatedBy: .newlines) where !line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -324,6 +346,11 @@ enum SidebarRepairPlanner {
                let value = payload["model_provider"] as? String {
                 provider = value
             }
+            if historyMode == nil,
+               let payload = object["payload"] as? [String: Any],
+               let value = payload["history_mode"] as? String {
+                historyMode = value
+            }
             if let timestamp = object["timestamp"] as? String,
                let parsed = parseTimestampMs(timestamp) {
                 if firstTimestampMs == nil {
@@ -332,7 +359,7 @@ enum SidebarRepairPlanner {
                 lastTimestampMs = parsed
             }
         }
-        return RolloutInfo(provider: provider, firstTimestampMs: firstTimestampMs, lastTimestampMs: lastTimestampMs)
+        return RolloutInfo(provider: provider, historyMode: historyMode, firstTimestampMs: firstTimestampMs, lastTimestampMs: lastTimestampMs)
     }
 
     private static func rolloutExists(_ path: String) -> Bool {

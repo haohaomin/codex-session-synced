@@ -67,6 +67,60 @@ struct SoftPanel<Content: View>: View {
     }
 }
 
+enum RepairCardTone {
+    case info
+    case success
+    case warning
+
+    var tint: Color {
+        switch self {
+        case .info: DS.blue
+        case .success: DS.ok
+        case .warning: DS.warn
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .info: "info.circle.fill"
+        case .success: "checkmark.circle.fill"
+        case .warning: "exclamationmark.triangle.fill"
+        }
+    }
+}
+
+struct RepairRiskCard: View {
+    var tone: RepairCardTone
+    var title: String
+    var message: String
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: tone.icon)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(tone.tint)
+                .frame(width: 32, height: 32)
+                .background(tone.tint.opacity(0.11), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(DS.ink)
+                Text(message)
+                    .font(.system(size: 12))
+                    .foregroundStyle(DS.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(14)
+        .background(tone.tint.opacity(0.055), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(tone.tint.opacity(0.18))
+        )
+    }
+}
+
 struct PrimaryButton: View {
     var title: String
     var systemImage: String

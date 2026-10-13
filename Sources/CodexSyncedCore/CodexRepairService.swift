@@ -53,6 +53,13 @@ public final class CodexRepairService {
         }
 
         let rolloutInfo = SidebarRepairPlanner.rolloutInfoByPath(for: threads)
+        let paginatedProviderWarnings = settings.alignProvidersForVisibility
+            ? SidebarRepairPlanner.paginatedProviderWarnings(
+                threads: threads,
+                rollouts: rolloutInfo,
+                targetProvider: providerInfo.provider
+            )
+            : []
         let sqliteProviderUpdates: [ProviderRepair]
         let rolloutRepairs: [RolloutRepair]
         if settings.alignProvidersForVisibility {
@@ -93,6 +100,7 @@ public final class CodexRepairService {
             sqliteTimestampRepairs: sqliteTimestampRepairs,
             sqliteTitleRepairs: sqliteTitleRepairs,
             rolloutMtimeRepairs: rolloutMtimeRepairs,
+            paginatedProviderWarnings: paginatedProviderWarnings,
             globalStateRepair: globalStateRepair,
             backups: backups,
             codexHome: codexHome,
@@ -200,6 +208,9 @@ struct BackupManifest: Codable {
 
     var record: BackupRecord
     var files: [FileItem]
+    /// Consolidated SQLite Backup API snapshots. These are evidence/verification
+    /// artifacts and are intentionally not copied over the live database on restore.
+    var sqliteSnapshots: [FileItem]?
     var rolloutFirstLines: [FirstLineItem]
     var rolloutMtimes: [MtimeItem]?
 }

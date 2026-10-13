@@ -38,6 +38,7 @@ extension CodexRepairService {
         )
 
         var files: [BackupManifest.FileItem] = []
+        var sqliteSnapshots: [BackupManifest.FileItem] = []
         func copy(_ url: URL, relative: String) throws {
             guard FileManager.default.fileExists(atPath: url.path) else { return }
             let destination = directory.appendingPathComponent(relative)
@@ -46,10 +47,21 @@ extension CodexRepairService {
             files.append(.init(originalPath: url.path, backupRelativePath: relative))
         }
 
-        if let stateURL = scan.stateDatabase?.url {
-            try copy(stateURL, relative: "sqlite/\(stateURL.lastPathComponent)")
-            try copy(URL(fileURLWithPath: stateURL.path + "-wal"), relative: "sqlite/\(stateURL.lastPathComponent)-wal")
-            try copy(URL(fileURLWithPath: stateURL.path + "-shm"), relative: "sqlite/\(stateURL.lastPathComponent)-shm")
+        // Keep the live database trio for exact rollback, and also create a
+        // SQLite Backup API snapshot. The latter is the consistent WAL-aware
+        // artifact used for independent integrity checks and incident review.
+        let sqliteURLs = try sqliteBackupCandidates(in: scan.sqliteHome, active: scan.stateDatabase?.url)
+        for sqliteURL in sqliteURLs {
+            try copy(sqliteURL, relative: "sqlite/\(sqliteURL.lastPathComponent)")
+            try copy(URL(fileURLWithPath: sqliteURL.path + "-wal"), relative: "sqlite/\(sqliteURL.lastPathComponent)-wal")
+            try copy(URL(fileURLWithPath: sqliteURL.path + "-shm"), relative: "sqlite/\(sqliteURL.lastPathComponent)-shm")
+
+            let snapshotRelative = "sqlite/snapshots/\(sqliteURL.lastPathComponent).snapshot.sqlite"
+            let snapshotURL = directory.appendingPathComponent(snapshotRelative)
+            try FileUtilities.ensureDirectory(snapshotURL.deletingLastPathComponent())
+            let source = try SQLiteDatabase(path: sqliteURL.path, readonly: true)
+            try source.backup(to: snapshotURL)
+            sqliteSnapshots.append(.init(originalPath: sqliteURL.path, backupRelativePath: snapshotRelative))
         }
         try copy(scan.codexHome.appendingPathComponent("config.toml"), relative: "codex/config.toml")
         try copy(scan.codexHome.appendingPathComponent("session_index.jsonl"), relative: "codex/session_index.jsonl")
@@ -75,13 +87,13 @@ extension CodexRepairService {
             sizeBytes: 0,
             path: directory.path
         )
-        let manifest = BackupManifest(record: record, files: files, rolloutFirstLines: firstLines, rolloutMtimes: mtimes)
+        let manifest = BackupManifest(record: record, files: files, sqliteSnapshots: sqliteSnapshots, rolloutFirstLines: firstLines, rolloutMtimes: mtimes)
         let manifestData = try JSONEncoder.codexSynced.encode(manifest)
         try manifestData.write(to: directory.appendingPathComponent("manifest.json"))
 
         var finalRecord = record
         finalRecord.sizeBytes = FileUtilities.directorySize(directory)
-        let finalManifest = BackupManifest(record: finalRecord, files: files, rolloutFirstLines: firstLines, rolloutMtimes: mtimes)
+        let finalManifest = BackupManifest(record: finalRecord, files: files, sqliteSnapshots: sqliteSnapshots, rolloutFirstLines: firstLines, rolloutMtimes: mtimes)
         try JSONEncoder.codexSynced.encode(finalManifest).write(to: directory.appendingPathComponent("manifest.json"))
         return finalRecord
     }
@@ -96,6 +108,26 @@ extension CodexRepairService {
 
     public func backupRoot(codexHome: URL) -> URL {
         codexHome.appendingPathComponent("codex-synced-backups", isDirectory: true)
+    }
+
+    private func sqliteBackupCandidates(in home: URL, active: URL?) throws -> [URL] {
+        let fm = FileManager.default
+        guard let entries = try? fm.contentsOfDirectory(at: home, includingPropertiesForKeys: [.isRegularFileKey]) else {
+            return []
+        }
+        let prefixes = ["state_", "thread_history_", "logs_"]
+        let candidates = entries.filter { url in
+            guard url.pathExtension == "sqlite",
+                  prefixes.contains(where: { url.lastPathComponent.hasPrefix($0) }) else { return false }
+            return (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) != false
+        }.sorted { $0.lastPathComponent < $1.lastPathComponent }
+
+        // The active state database is selected by scan() and must always be in
+        // the snapshot set, even if a platform exposes unusual file attributes.
+        if let active, !candidates.contains(where: { $0.standardizedFileURL == active.standardizedFileURL }) {
+            return [active] + candidates
+        }
+        return candidates
     }
 
     private func copyDirectoryIfExists(_ source: URL, to destination: URL) throws {

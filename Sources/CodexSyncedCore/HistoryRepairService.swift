@@ -130,10 +130,18 @@ public final class HistoryRepairService {
         let roots = [home.appendingPathComponent("sessions"), home.appendingPathComponent("archived_sessions")]
         var nodes: [String: [HistoryNode]] = [:]
         var issues: [String: [String]] = [:]
+        // An unparseable rollout filename cannot be assigned to a logical thread
+        // by ID. Keep the warning scoped to its directory instead of making one
+        // stray artifact block every conversation in the Codex home.
+        var unknownByDirectory: [String: [String]] = [:]
         var warnings: [String] = []
         for url in try rolloutFiles(roots: roots) {
+            if Self.isIgnoredArtifact(url) {
+                continue
+            }
             guard let ids = Self.ids(in: url) else {
                 warnings.append("无法识别文件名 / Unknown filename: \(url.lastPathComponent)")
+                unknownByDirectory[Self.directoryKey(url), default: []].append(url.lastPathComponent)
                 continue
             }
             do {
@@ -157,6 +165,7 @@ public final class HistoryRepairService {
                 issues[ids.logical, default: []].append("\(url.lastPathComponent): \(error.localizedDescription)")
             }
         }
+        let globalByPhysicalID = Dictionary(grouping: nodes.values.flatMap { $0 }, by: \.physicalID)
         var diagnoses: [HistoryDiagnosis] = []
         for row in rows where row.fields["history_mode"]?.value == "paginated" {
             let group = nodes[row.id] ?? []
@@ -164,11 +173,11 @@ public final class HistoryRepairService {
                 if let errors = issues[row.id], !errors.isEmpty {
                     throw HistoryRepairError.unsafe(errors.joined(separator: "\n"))
                 }
-                let chain = try Self.chain(group, row: row)
+                let chain = try Self.chain(group, row: row, globalByPhysicalID: globalByPhysicalID)
                 let checked = try Self.validate(chain)
                 let leaf = chain.last!
                 let unchanged = leaf.url.standardizedFileURL.path == URL(fileURLWithPath: row.path).standardizedFileURL.path
-                let blocked = !warnings.isEmpty
+                let blocked = unknownByDirectory[Self.directoryKey(URL(fileURLWithPath: row.path))]?.isEmpty == false
                 diagnoses.append(HistoryDiagnosis(proposedPath: unchanged || blocked ? nil : leaf.url.path,
                     detail: unchanged ? "入口已指向唯一末端；未验证客户端读取。Entrypoint is current; client reading not verified."
                         : blocked ? "扫描存在无法识别的文件，禁止自动修复。Unknown files block automatic repair."
@@ -290,7 +299,7 @@ public final class HistoryRepairService {
         } catch { return true }
     }
 
-    private static func chain(_ nodes: [HistoryNode], row: EntrypointRow) throws -> [HistoryNode] {
+    private static func chain(_ nodes: [HistoryNode], row: EntrypointRow, globalByPhysicalID: [String: [HistoryNode]]) throws -> [HistoryNode] {
         guard !nodes.isEmpty else { throw HistoryRepairError.unsafe("找不到原始分支文件 / Missing rollout") }
         let byID = Dictionary(grouping: nodes, by: \.physicalID)
         guard byID.values.allSatisfy({ $0.count == 1 }) else {
@@ -308,18 +317,21 @@ public final class HistoryRepairService {
             guard visited.insert(node.physicalID).inserted else { throw HistoryRepairError.unsafe("分支循环 / Cycle") }
             reversed.append(node)
             if let base = node.base {
-                guard let parent = byID[base.thread_id]?.first else {
+                let localParent = byID[base.thread_id]?.first
+                let globalParents = globalByPhysicalID[base.thread_id] ?? []
+                guard let parent = localParent ?? (globalParents.count == 1 ? globalParents[0] : nil) else {
                     throw HistoryRepairError.unsafe("父分支缺失 / Missing parent: \(base.thread_id)")
                 }
                 cursor = parent
             } else {
-                guard node.physicalID == row.id, node.start == 0 else {
+                guard node.start == 0 else {
                     throw HistoryRepairError.unsafe("原始根分支无法确认 / Unconfirmed root")
                 }
                 cursor = nil
             }
         }
-        guard visited.count == nodes.count,
+        let localIDs = Set(nodes.map(\.physicalID))
+        guard localIDs.isSubset(of: visited),
               nodes.contains(where: { $0.url.standardizedFileURL.path == URL(fileURLWithPath: row.path).standardizedFileURL.path }) else {
             throw HistoryRepairError.unsafe("入口不在完整的唯一分支链上 / Entrypoint not on a unique complete chain")
         }
@@ -401,6 +413,21 @@ public final class HistoryRepairService {
 
     private static func isInside(_ url: URL, root: URL) -> Bool {
         url.resolvingSymlinksInPath().path.hasPrefix(root.resolvingSymlinksInPath().path + "/")
+    }
+
+    private static func directoryKey(_ url: URL) -> String {
+        url.deletingLastPathComponent().standardizedFileURL.path
+    }
+
+    /// Session folders occasionally contain editor leftovers and copied repair
+    /// evidence. They are not rollout inputs and must not poison a scan.
+    private static func isIgnoredArtifact(_ url: URL) -> Bool {
+        let name = url.lastPathComponent.lowercased()
+        return name.hasPrefix(".") ||
+            name.contains(".codex-synced-") ||
+            name.hasSuffix("_repaired.jsonl") ||
+            name.hasSuffix(".bak.jsonl") ||
+            name.hasSuffix(".tmp.jsonl")
     }
 
     private static func firstLine(_ url: URL) throws -> Data? {

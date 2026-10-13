@@ -280,6 +280,23 @@ public struct RolloutMtimeRepair: Identifiable, Equatable, Codable, Sendable {
     }
 }
 
+public struct PaginatedProviderWarning: Identifiable, Equatable, Codable, Sendable {
+    public var id: String { threadID }
+    public var threadID: String
+    public var title: String
+    public var rolloutPath: String
+    public var currentProvider: String
+    public var targetProvider: String
+
+    public init(threadID: String, title: String, rolloutPath: String, currentProvider: String, targetProvider: String) {
+        self.threadID = threadID
+        self.title = title
+        self.rolloutPath = rolloutPath
+        self.currentProvider = currentProvider
+        self.targetProvider = targetProvider
+    }
+}
+
 public struct GlobalStateRepair: Equatable, Codable, Sendable {
     public var changes: [String]
     public var repairedJSON: String
@@ -301,6 +318,7 @@ public struct ScanResult: Equatable, Sendable {
     public var sqliteTimestampRepairs: [TimestampRepair]
     public var sqliteTitleRepairs: [TitleRepair]
     public var rolloutMtimeRepairs: [RolloutMtimeRepair]
+    public var paginatedProviderWarnings: [PaginatedProviderWarning]
     public var globalStateRepair: GlobalStateRepair?
     public var backups: [BackupRecord]
     public var codexHome: URL
@@ -318,7 +336,7 @@ public struct ScanResult: Equatable, Sendable {
             globalStateRepair != nil
     }
 
-    public init(providerInfo: ProviderInfo, stateDatabase: StateDatabase?, threads: [ThreadRow], sqliteProviderUpdates: [ProviderRepair], sqliteCompatibilityUpdates: [ThreadRow], rolloutRepairs: [RolloutRepair], indexRepairs: [IndexRepair], sqliteTimestampRepairs: [TimestampRepair], sqliteTitleRepairs: [TitleRepair], rolloutMtimeRepairs: [RolloutMtimeRepair], globalStateRepair: GlobalStateRepair?, backups: [BackupRecord], codexHome: URL, sqliteHome: URL, lastRepairAt: Date?) {
+    public init(providerInfo: ProviderInfo, stateDatabase: StateDatabase?, threads: [ThreadRow], sqliteProviderUpdates: [ProviderRepair], sqliteCompatibilityUpdates: [ThreadRow], rolloutRepairs: [RolloutRepair], indexRepairs: [IndexRepair], sqliteTimestampRepairs: [TimestampRepair], sqliteTitleRepairs: [TitleRepair], rolloutMtimeRepairs: [RolloutMtimeRepair], paginatedProviderWarnings: [PaginatedProviderWarning] = [], globalStateRepair: GlobalStateRepair?, backups: [BackupRecord], codexHome: URL, sqliteHome: URL, lastRepairAt: Date?) {
         self.providerInfo = providerInfo
         self.stateDatabase = stateDatabase
         self.threads = threads
@@ -329,6 +347,7 @@ public struct ScanResult: Equatable, Sendable {
         self.sqliteTimestampRepairs = sqliteTimestampRepairs
         self.sqliteTitleRepairs = sqliteTitleRepairs
         self.rolloutMtimeRepairs = rolloutMtimeRepairs
+        self.paginatedProviderWarnings = paginatedProviderWarnings
         self.globalStateRepair = globalStateRepair
         self.backups = backups
         self.codexHome = codexHome

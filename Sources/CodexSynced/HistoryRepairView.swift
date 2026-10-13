@@ -19,6 +19,11 @@ struct HistoryRepairView: View {
                             .font(.headline)
                         Text(t("扫描只读。修复或撤销前必须退出 Codex；逐条预览并确认，不批量处理。多个末端、缺失文件、偏移不一致均需人工检查。", "Scanning is read-only. Quit Codex before repair or rollback. Review one chat at a time. Multiple tips, missing files and offset mismatches require manual review."))
                             .foregroundStyle(DS.muted)
+                        RepairRiskCard(
+                            tone: .info,
+                            title: t("验收边界", "Verification boundary"),
+                            message: t("文件哈希、序号和字节边界通过，只代表入口修复安全；重新打开对话并重启 Codex 后，仍需人工核对正文顺序、遗漏、重复和项目归属。", "Passing file hashes, ordinals and byte boundaries proves the entrypoint change is safe; reopen the chat and restart Codex to verify message order, omissions, duplicates and project ownership." )
+                        )
                         HStack {
                             Button(t("只读扫描", "Read-only Scan")) { Task { await model.scanHistory() } }
                                 .buttonStyle(.borderedProminent).disabled(model.isBusy)

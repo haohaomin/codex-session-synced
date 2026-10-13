@@ -4,15 +4,26 @@
 
 Codex Synced 是一个 Windows / macOS 本地修复工具，用来解决 Codex Desktop 侧边栏会话历史不可见、标题显示为“新对话”、时间排序异常等本地状态问题。
 
-它会预览需要修复的本地记录，并在备份后修复 SQLite 摘要、`session_index.jsonl`、rollout 文件 mtime 和 `.codex-global-state.json` 中影响侧边栏显示的字段。默认会把可恢复的普通会话（包括归档会话）及其 rollout metadata 对齐到当前根级 `model_provider`，解决切换官方或第三方 Provider 后历史被过滤的问题；也可以在设置中关闭跨 Provider 对齐，改为仅按 rollout 修正 SQLite。
+它会预览需要修复的本地记录，并在备份后修复 SQLite 摘要、`session_index.jsonl`、rollout 文件 mtime 和 `.codex-global-state.json` 中影响侧边栏显示的字段。默认会把可恢复的普通会话（包括归档会话）及其**可安全改写的** rollout metadata 对齐到当前根级 `model_provider`，解决切换官方或第三方 Provider 后历史被过滤的问题；分页 rollout 的 Provider 不一致会单独标记为需确认，不会在未重算 `history_base` 字节边界前直接改写。也可以在设置中关闭跨 Provider 对齐，改为仅按 rollout 修正 SQLite。
 
 它不是云同步工具，也不会上传你的会话。所有扫描、备份、修复都发生在本机。
+
+## 1.5.0：Provider 切换诊断与安全备份
+
+本版本把 Provider 切换后的可见性修复、分页风险提示和备份边界统一到同一套“诊断 → 预览 → 备份 → 验收”流程。分页 rollout 仍不会被静默改写；需要重算 `history_base` 的情况会明确停在人工确认。
+
+[1.5.0 发布说明](docs/release/v1.5.0.md) · [下载 1.5.0](https://github.com/renhao12356578/codex-session-synced/releases/tag/v1.5.0)
+
+- **Provider 风险分层**：普通格式会话继续支持安全对齐；分页 Provider 差异独立展示，不把 SQLite 元数据修复冒充为正文修复。
+- **WAL 一致备份**：轻量备份保留活动数据库的主文件、WAL/SHM，并额外写入 `SQLite Backup API` 一致快照；同时覆盖存在的 `state_*`、`thread_history_*` 和 `logs_*` 数据库。
+- **局部未知文件阻断**：临时文件、修复残留和备份副本会被忽略；无法识别的 rollout 只阻断同目录会话，不再让无关目录全部停摆。
+- **统一风险界面**：待修复项和对话修复页使用统一的状态卡片、风险卡片和验收边界文案。
 
 ## 1.4.0：对话诊断与入口修复（macOS 实验性功能）
 
 新增独立的「对话修复」页面，用于**原始 JSONL 仍在，但主对话入口停留在旧分支，导致后续消息不显示**的情况。本功能不混入原有侧边栏一键修复；仅 macOS 1.4.0 提供，Windows 1.4.0 保留原有功能，不包含新增入口修复。
 
-[1.4.0 发布说明](docs/release/v1.4.0.md) · [下载 1.4.0](https://github.com/renhao12356578/codex-session-synced/releases/tag/v1.4.0)
+[1.4.0 发布说明](docs/release/v1.4.0.md)
 
 - **只读诊断与预览**：读取 `sessions`、`archived_sessions` 与状态库，区分主对话 ID 和文件名中的物理分支 ID，沿原始 `history_base` 检查完整的唯一后继链。不按文件修改时间猜测活跃分支。
 - **保守阻断**：遇到多个末端、循环、重复物理 ID、缺失父文件、非法 JSON、序号不连续、字节偏移不一致、符号链接或未知格式，拒绝自动修复。有效继承范围的消息记录统计排除被替换的父分支尾部，但不是客户端轮数。
@@ -20,17 +31,18 @@ Codex Synced 是一个 Windows / macOS 本地修复工具，用来解决 Codex D
 - **WAL 安全备份与副本试写**：使用 SQLite Backup API 保存状态库（包含已提交的 WAL 内容），另存分支链原文件。先在独立数据库副本试写，再对真实库进行事务内检查、写入与完整性校验；预览过期则拒绝操作。
 - **安全撤销**：只反向更新本次入口字段，不覆盖整库。若目标记录、任一源文件或分支链发生变化，则拒绝撤销，保护新消息。备份目录为所选 Codex Home 下的 `history-entrypoint-backups/`，不参与旧备份的自动轮换。记录在提交前持久化，包含未提交的操作意图，不能仅凭记录存在判断修复成功。
 - **保护分页文件**：macOS 原有 Provider 修复不再改写带 `history_mode: paginated`、`history_base` 或 `ordinal` 的 JSONL 首行，避免使后继分支保存的字节偏移失效。旧格式的 Provider 修复不变。
+- **分页 Provider 风险提示**：扫描会显示 SQLite 与分页 rollout Provider 的差异；这类项目需要单独确认，不会被误报为已完成的正文或历史修复。
 
 ### 使用与验收边界
 
-1. 安装并打开 macOS 1.4.0，进入「对话修复」，点击「只读扫描」。可在设置中指定 Codex Home / SQLite Home；选定的 SQLite 目录必须仅包含一个 `state_*.sqlite`。
+1. 安装并打开 macOS 1.5.0，进入「对话修复」，点击「只读扫描」。可在设置中指定 Codex Home / SQLite Home；选定的 SQLite 目录必须仅包含一个 `state_*.sqlite`。
 2. 检查建议入口与诊断依据，正常退出 Codex 及相关 CLI 后，逐条确认「备份并修复入口」。异常项需人工调查，不提供强制修复开关。
 3. 修复后重新打开原对话，检查有效消息的内容、顺序、遗漏和重复；再正常退出并重启 Codex，检查正确分支是否仍然可读，以及项目归属是否不变。
 4. 必要时在同一页面的修复记录中撤销。若提示数据已变化，不要直接用旧数据库覆盖当前数据库。
 
 **当前自动验证范围**：原始分支文件逐字节 SHA-256 一致、完整序号/继承字节边界、除入口外全部 SQLite 字段不变，以及 SQLite 完整性。副本试写只验证数据库修改，**没有在隔离客户端内执行 `thread/read` / 分页 API 的逐条正文对照，也没有自动验证桌面重新打开与重启持久性**。因此成功提示是「入口已修复」，不是「对话全部验收通过」。字节偏移不一致（包括已知相差 50 字节的情况）仅报告，不自动修正。
 
-备份包含私人对话正文和数据库元数据，请按原始数据同等保护。该功能不备份未修改的全部历史/日志数据库，也不宣称跨库原子快照。扫描和验证耗时取决于本地分支文件大小。
+备份包含私人对话正文和数据库元数据，请按原始数据同等保护。轻量备份现在会对存在的状态、历史和日志数据库生成 WAL 一致快照；这仍不是跨多个数据库的原子事务。扫描和验证耗时取决于本地分支文件大小。
 
 新增回归测试使用独立临时样本，覆盖编辑替换、元数据与原文件保留、WAL 备份、过期预览、缺失/歧义分支、偏移异常、事务回滚及拒绝覆盖后续变化。
 
@@ -57,17 +69,17 @@ Codex Synced 是一个 Windows / macOS 本地修复工具，用来解决 Codex D
 
 ## Windows 下载与使用
 
-1. 前往 [GitHub Releases](https://github.com/renhao12356578/codex-session-synced/releases/latest) 下载 `Codex-Synced-Windows-x64-1.4.0.msi`。
+1. 前往 [GitHub Releases](https://github.com/renhao12356578/codex-session-synced/releases/latest) 下载 `Codex-Synced-Windows-x64-1.5.0.msi`。
 2. 退出 Codex。
 3. 双击 MSI 完成安装，然后从开始菜单打开 `Codex Synced`。
 4. 查看待修复项，选择备份模式，点击“备份并修复”。
 5. 重新打开 Codex，检查历史会话。
 
-Windows 版是完整桌面应用安装包，默认读取 `%USERPROFILE%\.codex`，并会自动识别当前活跃的状态库目录；也可以在设置中修改目录。Release 中也提供 `Codex-Synced-Windows-x64-1.4.0.zip`，用于不想安装时手动运行应用目录。
+Windows 版是完整桌面应用安装包，默认读取 `%USERPROFILE%\.codex`，并会自动识别当前活跃的状态库目录；也可以在设置中修改目录。Release 中也提供 `Codex-Synced-Windows-x64-1.5.0.zip`，用于不想安装时手动运行应用目录。
 
 ## macOS 下载与安装
 
-1. 前往 [GitHub Releases](https://github.com/renhao12356578/codex-session-synced/releases/latest) 下载 `Codex-Synced-macOS-1.4.0.dmg`。
+1. 前往 [GitHub Releases](https://github.com/renhao12356578/codex-session-synced/releases/latest) 下载 `Codex-Synced-macOS-1.5.0.dmg`。
 2. 双击打开 DMG。
 3. 将 `Codex Synced.app` 拖入 `Applications`。
 4. 第一次打开时，如果 macOS 提示来自未验证开发者，请在 Finder 中右键点击应用，选择“打开”，再确认打开。
@@ -83,7 +95,7 @@ Windows 版是完整桌面应用安装包，默认读取 `%USERPROFILE%\.codex`�
 2. 可选：校验下载文件的 SHA256，应与 Release 页面一致：
 
 ```bash
-shasum -a 256 ~/Downloads/Codex-Synced-macOS-1.4.0.dmg
+shasum -a 256 ~/Downloads/Codex-Synced-macOS-1.5.0.dmg
 ```
 
 3. 先尝试 Apple 推荐的方式：在 Finder 中进入 `Applications`，右键点击 `Codex Synced.app`，选择“打开”，再确认打开。

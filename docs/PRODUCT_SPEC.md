@@ -163,6 +163,7 @@ threads.thread_source
 
 - 完整 `state_*.sqlite`
 - 存在时保存对应 `-wal` 和 `-shm`
+- 对存在的 `state_*`、`thread_history_*`、`logs_*` 数据库生成 SQLite Backup API 一致快照
 - `config.toml`
 - `session_index.jsonl`
 - 必要的全局状态小文件
@@ -184,6 +185,8 @@ threads.thread_source
 - 与修复有关的本地状态文件
 
 适用于首次使用、重大版本升级后或用户主动要求更强灾备的场景。
+
+分页 rollout 的 Provider 差异只在界面中作为人工确认风险展示。除非未来版本能够证明完整的分支链和偏移重算，默认流程不得修改分页首行或伪造“正文已修复”。
 
 ### 7.3 轮换规则
 

@@ -176,6 +176,28 @@ struct HistoryRepairTests {
         #expect(scan.diagnoses.first?.canRepair == false)
     }
 
+    @Test func unknownRolloutInAnotherDirectoryDoesNotBlockUnrelatedThread() throws {
+        let f = try Fixture()
+        defer { f.clean() }
+        let unrelated = f.home.appendingPathComponent("sessions/2026/10/13")
+        try FileManager.default.createDirectory(at: unrelated, withIntermediateDirectories: true)
+        try Data().write(to: unrelated.appendingPathComponent("rollout-unknown.jsonl"))
+        let scan = try f.service.scan(settings: f.settings)
+        #expect(!scan.warnings.isEmpty)
+        #expect(scan.diagnoses.first?.canRepair == true)
+    }
+
+    @Test func repairArtifactsAreIgnoredDuringHistoryScan() throws {
+        let f = try Fixture()
+        defer { f.clean() }
+        for name in [".rollout-copy.jsonl", "rollout-copy_repaired.jsonl", "rollout-copy.bak.jsonl", ".rollout-copy.codex-synced-123.tmp.jsonl"] {
+            try Data().write(to: f.original.deletingLastPathComponent().appendingPathComponent(name))
+        }
+        let scan = try f.service.scan(settings: f.settings)
+        #expect(scan.warnings.isEmpty)
+        #expect(scan.diagnoses.first?.canRepair == true)
+    }
+
     @Test func automaticDiscoveryDoesNotGuessBetweenRootAndNestedDatabases() throws {
         let f = try Fixture()
         defer { f.clean() }
@@ -218,6 +240,36 @@ struct HistoryRepairTests {
         #expect(item.messageCount == 3)
         #expect(item.files.count == 3)
         #expect(item.proposedPath.map { URL(fileURLWithPath: $0).lastPathComponent } == f.extraBranch().lastPathComponent)
+    }
+
+    @Test func crossLogicalParentIsResolvedByUniquePhysicalID() throws {
+        let f = try Fixture()
+        defer { f.clean() }
+        let externalID = "00000000-0000-0000-0000-000000000009"
+        let parent = f.home.appendingPathComponent("sessions/2026/10/12/rollout-2026-10-12T00-00-30-\(externalID).jsonl")
+        let parentText = """
+        {"ordinal":0,"type":"session_meta","payload":{"id":"\(externalID)","history_mode":"paginated","model_provider":"openai"}}
+        {"ordinal":1,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"external parent"}]}}
+        """
+        try parentText.write(to: parent, atomically: true, encoding: .utf8)
+
+        let parentEnd = parentText.utf8.count
+        let first = """
+        {"ordinal":2,"type":"session_meta","payload":{"id":"\(Fixture.threadID)","history_mode":"paginated","history_base":{"thread_id":"\(externalID)","end_ordinal_exclusive":2,"end_byte_offset":\(parentEnd)}}}
+        {"ordinal":3,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"first branch"}]}}
+        """
+        try first.write(to: f.child, atomically: true, encoding: .utf8)
+        let leaf = f.extraBranch()
+        let leafText = """
+        {"ordinal":4,"type":"session_meta","payload":{"id":"\(Fixture.threadID)","history_mode":"paginated","history_base":{"thread_id":"\(Fixture.branchID)","end_ordinal_exclusive":4,"end_byte_offset":\(first.utf8.count)}}}
+        {"ordinal":5,"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"leaf"}]}}
+        """
+        try leafText.write(to: leaf, atomically: true, encoding: .utf8)
+        try FileManager.default.removeItem(at: f.original)
+        try f.sql("UPDATE threads SET rollout_path = '\(f.child.path)'")
+
+        let (_, item) = try f.preview()
+        #expect(item.proposedPath.map { URL(fileURLWithPath: $0).standardizedFileURL } == leaf.standardizedFileURL)
     }
 
     @Test func endOfFileAndCRLFBoundariesAreByteAccurate() throws {

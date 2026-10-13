@@ -14,6 +14,7 @@ This release unifies provider-switch visibility repair, paginated-risk warnings,
 - **WAL-consistent backups**: lightweight backups retain live SQLite/WAL/SHM files and create SQLite Backup API snapshots for present `state_*`, `thread_history_*`, and `logs_*` databases.
 - **Scoped unknown-file blocking**: temporary, repair, and backup artifacts are ignored; an unrecognized rollout only blocks chats in its own directory.
 - **Unified risk UI**: the pending-repair and chat-repair pages now use the same status, risk, and verification-boundary cards.
+- **Windows paginated safety boundary**: Windows scans identify paginated rollouts and show Provider mismatches as manual-review risks. Paginated threads are excluded from ordinary SQLite Provider alignment and rollout-header writes. The complete byte-offset recalculation engine is not yet ported to Windows; see the [Windows paginated safety plan](docs/windows-paginated-safety-plan.md).
 
 ## 1.6.0: safe paginated Provider repair
 
@@ -29,7 +30,7 @@ The full test suite and Release build pass. After applying a repair, reopen and 
 
 ## 1.4.0: Chat Diagnosis & Entrypoint Repair (experimental, macOS)
 
-The new **Chat Repair** page addresses paginated chats whose JSONL files still exist but whose logical thread points to an older branch. It is separate from sidebar repair and available in macOS 1.4.0 only. Windows 1.4.0 retains its existing functionality without the new entrypoint repair.
+The new **Chat Repair** page addresses paginated chats whose JSONL files still exist but whose logical thread points to an older branch. It is separate from sidebar repair and the complete entrypoint repair remains macOS-only. Windows now diagnoses paginated Provider risks and protects their rollout headers, but does not yet recalculate paginated byte offsets.
 
 [1.4.0 release notes](docs/release/v1.4.0-en.md)
 

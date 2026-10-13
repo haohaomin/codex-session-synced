@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Globalization;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -130,6 +131,12 @@ internal sealed record ThreadRow(
     public long? EffectiveRecencyAtMs => RecencyAtMs is > 0 ? RecencyAtMs.Value : RecencyAt > 0 ? RecencyAt * 1000 : null;
 }
 internal sealed record ProviderRepair(ThreadRow Thread, string TargetProvider);
+internal sealed record PaginatedProviderWarning(
+    string ThreadId,
+    string Title,
+    string RolloutPath,
+    string CurrentProvider,
+    string TargetProvider);
 internal sealed record RolloutRepair(
     string Path,
     string SessionId,
@@ -182,6 +189,7 @@ internal sealed class ScanResult
     public required List<ProviderRepair> SqliteProviderUpdates { get; init; }
     public required List<ThreadRow> SqliteCompatibilityUpdates { get; init; }
     public required List<RolloutRepair> RolloutRepairs { get; init; }
+    public required List<PaginatedProviderWarning> PaginatedProviderWarnings { get; init; }
     public required List<IndexRepair> IndexRepairs { get; init; }
     public required List<TimestampRepair> SqliteTimestampRepairs { get; init; }
     public required List<TitleRepair> SqliteTitleRepairs { get; init; }
@@ -191,6 +199,8 @@ internal sealed class ScanResult
     public required string CodexHome { get; init; }
     public required string SqliteHome { get; init; }
     public bool AlignProvidersForVisibility { get; init; }
+
+    public bool HasWarnings => PaginatedProviderWarnings.Count > 0;
 
     public bool HasRepairs =>
         SqliteProviderUpdates.Count > 0 ||
@@ -224,6 +234,7 @@ internal sealed class ScanResult
         sqliteProviderUpdates = SqliteProviderUpdates.Count,
         sqliteCompatibilityUpdates = SqliteCompatibilityUpdates.Count,
         rolloutRepairs = RolloutRepairs.Count,
+        paginatedProviderWarnings = PaginatedProviderWarnings.Count,
         indexRepairs = IndexRepairs.Count,
         sqliteTimestampRepairs = SqliteTimestampRepairs.Count,
         sqliteTitleRepairs = SqliteTitleRepairs.Count,
@@ -327,11 +338,18 @@ internal sealed class RepairService
             threads = db.QueryThreads();
         }
         var rolloutInfo = RolloutInfoByPath(threads);
+        var paginatedProviderWarnings = settings.AlignProvidersForVisibility
+            ? PaginatedProviderWarnings(threads, rolloutInfo, provider)
+            : [];
+        var paginatedPaths = rolloutInfo
+            .Where(item => item.Value.IsPaginated)
+            .Select(item => item.Key)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
         var sqliteProviderUpdates = settings.AlignProvidersForVisibility
-            ? ProviderAlignmentRepairs(threads, provider)
+            ? ProviderAlignmentRepairs(threads, provider, paginatedPaths)
             : ProviderRepairs(threads, rolloutInfo);
         var rolloutRepairs = settings.AlignProvidersForVisibility
-            ? RolloutProviderAlignmentRepairs(threads, provider)
+            ? RolloutProviderAlignmentRepairs(threads, provider, rolloutInfo)
             : new List<RolloutRepair>();
         var titleRepairs = TitleRepairs(threads);
         var timestampRepairs = TimestampRepairs(threads, rolloutInfo);
@@ -345,6 +363,7 @@ internal sealed class RepairService
             SqliteProviderUpdates = sqliteProviderUpdates,
             SqliteCompatibilityUpdates = [],
             RolloutRepairs = rolloutRepairs,
+            PaginatedProviderWarnings = paginatedProviderWarnings,
             IndexRepairs = IndexRepairs(codexHome, projectedThreads),
             SqliteTimestampRepairs = timestampRepairs,
             SqliteTitleRepairs = titleRepairs,
@@ -536,7 +555,7 @@ internal sealed class RepairService
         return new(path, sessionId, current, targetProvider, firstLine, repairedFirstLine);
     }
 
-    private sealed record RolloutInfo(string? Provider, long? FirstTimestampMs, long? LastTimestampMs);
+    private sealed record RolloutInfo(string? Provider, long? FirstTimestampMs, long? LastTimestampMs, bool IsPaginated);
 
     private static Dictionary<string, RolloutInfo> RolloutInfoByPath(List<ThreadRow> threads)
     {
@@ -549,10 +568,11 @@ internal sealed class RepairService
     private static RolloutInfo InspectRollout(string path)
     {
         if (!File.Exists(path))
-            return new(null, null, null);
+            return new(null, null, null, false);
         string? provider = null;
         long? firstTimestamp = null;
         long? lastTimestamp = null;
+        var isPaginated = false;
         foreach (var line in ReadLinesShared(path))
         {
             if (string.IsNullOrWhiteSpace(line))
@@ -560,8 +580,16 @@ internal sealed class RepairService
             try
             {
                 var node = JsonNode.Parse(line)?.AsObject();
-                if (provider is null && node?["payload"] is JsonObject payload)
-                    provider = payload["model_provider"]?.GetValue<string>();
+                if (node?["payload"] is JsonObject payload)
+                {
+                    if (provider is null)
+                        provider = payload["model_provider"]?.GetValue<string>();
+                    if (payload["history_mode"]?.GetValue<string>() == "paginated" ||
+                        payload["history_base"] is JsonObject)
+                        isPaginated = true;
+                }
+                if (node?["ordinal"] is not null)
+                    isPaginated = true;
                 var timestamp = node?["timestamp"]?.GetValue<string>();
                 if (timestamp is not null && TryParseTimestampMs(timestamp, out var parsed))
                 {
@@ -574,33 +602,45 @@ internal sealed class RepairService
                 // Ignore malformed rollout lines; other lines can still carry usable timestamps.
             }
         }
-        return new(provider, firstTimestamp, lastTimestamp);
+        return new(provider, firstTimestamp, lastTimestamp, isPaginated);
     }
 
     private static List<ProviderRepair> ProviderRepairs(List<ThreadRow> threads, Dictionary<string, RolloutInfo> rollouts) =>
         threads
-            .Where(row => rollouts.TryGetValue(row.RolloutPath, out var info) && !string.IsNullOrWhiteSpace(info.Provider) && info.Provider != row.ModelProvider)
+            .Where(row => rollouts.TryGetValue(row.RolloutPath, out var info) && !info.IsPaginated && !string.IsNullOrWhiteSpace(info.Provider) && info.Provider != row.ModelProvider)
             .Select(row => new ProviderRepair(row, rollouts[row.RolloutPath].Provider!))
             .ToList();
 
-    private static List<ProviderRepair> ProviderAlignmentRepairs(List<ThreadRow> threads, string targetProvider) =>
+    private static List<ProviderRepair> ProviderAlignmentRepairs(List<ThreadRow> threads, string targetProvider, HashSet<string> paginatedPaths) =>
         string.IsNullOrWhiteSpace(targetProvider)
             ? []
             : ProviderAlignmentThreads(threads)
-                .Where(row => row.ModelProvider != targetProvider)
+                .Where(row => !paginatedPaths.Contains(row.RolloutPath) && row.ModelProvider != targetProvider)
                 .Select(row => new ProviderRepair(row, targetProvider))
                 .ToList();
 
-    private static List<RolloutRepair> RolloutProviderAlignmentRepairs(List<ThreadRow> threads, string targetProvider)
+    private static List<RolloutRepair> RolloutProviderAlignmentRepairs(List<ThreadRow> threads, string targetProvider, Dictionary<string, RolloutInfo> rollouts)
     {
         if (string.IsNullOrWhiteSpace(targetProvider))
             return [];
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         return ProviderAlignmentThreads(threads)
+            .Where(row => rollouts.TryGetValue(row.RolloutPath, out var info) && !info.IsPaginated)
             .Where(row => seen.Add(row.RolloutPath))
             .Select(row => MakeRolloutRepair(row.RolloutPath, targetProvider))
             .Where(repair => repair is not null)
             .Select(repair => repair!)
+            .ToList();
+    }
+
+    private static List<PaginatedProviderWarning> PaginatedProviderWarnings(List<ThreadRow> threads, Dictionary<string, RolloutInfo> rollouts, string targetProvider)
+    {
+        if (string.IsNullOrWhiteSpace(targetProvider))
+            return [];
+        return ProviderAlignmentThreads(threads)
+            .Select(row => (row, info: rollouts.TryGetValue(row.RolloutPath, out var info) ? info : null))
+            .Where(item => item.info is { IsPaginated: true } && !string.IsNullOrWhiteSpace(item.info.Provider) && item.info.Provider != targetProvider)
+            .Select(item => new PaginatedProviderWarning(item.row.Id, item.row.Title, item.row.RolloutPath, item.info!.Provider!, targetProvider))
             .ToList();
     }
 
@@ -1977,6 +2017,28 @@ internal static class SelfTest
             Assert(File.ReadAllText(rollout).Contains("\"message\":\"keep me\""), "Rollout body changed unexpectedly during provider alignment.");
             Assert(File.ReadAllText(archivedRollout).Contains("\"model_provider\":\"custom\""), "Archived rollout provider was not aligned to custom.");
             Assert(File.ReadAllText(archivedRollout).Contains("\"message\":\"archived body\""), "Archived rollout body changed unexpectedly.");
+
+            var paginatedRoot = Path.Combine(root, "paginated-safety");
+            Directory.CreateDirectory(paginatedRoot);
+            File.WriteAllText(Path.Combine(paginatedRoot, "config.toml"), "model_provider = \"custom\"" + Environment.NewLine);
+            var paginatedDirectory = Path.Combine(paginatedRoot, "sessions", "2026", "06", "03");
+            Directory.CreateDirectory(paginatedDirectory);
+            var paginatedRollout = Path.Combine(paginatedDirectory, "rollout-paginated.jsonl");
+            File.WriteAllText(paginatedRollout, "{\"timestamp\":\"2026-06-03T12:00:00.000Z\",\"ordinal\":0,\"type\":\"session_meta\",\"payload\":{\"id\":\"paginated\",\"history_mode\":\"paginated\",\"model_provider\":\"openai\"}}" + Environment.NewLine + "{\"ordinal\":1,\"type\":\"event_msg\",\"payload\":{\"message\":\"keep paginated body\"}}" + Environment.NewLine);
+            CreateSingleThreadState(Path.Combine(paginatedRoot, "state_5.sqlite"), "paginated", paginatedRollout);
+            var beforePaginated = File.ReadAllText(paginatedRollout);
+            var beforePaginatedHash = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(paginatedRollout)));
+            var paginatedScan = service.Scan(new AppSettings { CodexHome = paginatedRoot, OpenCodexAfterRepair = false, AlignProvidersForVisibility = true });
+            Assert(paginatedScan.PaginatedProviderWarnings.Count == 1, "Paginated Provider warning was not reported.");
+            Assert(paginatedScan.SqliteProviderUpdates.Count == 0, "Paginated thread was incorrectly added to SQLite Provider writes.");
+            Assert(paginatedScan.RolloutRepairs.Count == 0, "Paginated rollout was incorrectly added to header writes.");
+            if (paginatedScan.HasRepairs)
+                service.Repair(paginatedScan, new AppSettings { CodexHome = paginatedRoot, OpenCodexAfterRepair = false, AlignProvidersForVisibility = true }, BackupMode.Lightweight, true);
+            Assert(File.ReadAllText(paginatedRollout) == beforePaginated, "Paginated rollout was modified by Windows repair.");
+            Assert(Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(paginatedRollout))) == beforePaginatedHash, "Paginated rollout hash changed during Windows repair.");
+            var postPaginated = service.Scan(new AppSettings { CodexHome = paginatedRoot, OpenCodexAfterRepair = false, AlignProvidersForVisibility = true });
+            Assert(postPaginated.PaginatedProviderWarnings.Count == 1, "Paginated Provider warning disappeared without a paginated repair.");
+            Assert(postPaginated.SqliteProviderUpdates.Count == 0 && postPaginated.RolloutRepairs.Count == 0, "Paginated Provider writes reappeared after safe repair.");
 
             var migratedRoot = Path.Combine(root, "migrated-sqlite-home");
             Directory.CreateDirectory(migratedRoot);

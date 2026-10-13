@@ -263,7 +263,7 @@ internal sealed class MainWindow : Window
 
     private UIElement BuildHome()
     {
-        var status = _scanError is not null ? Warn : _scan?.HasRepairs == true ? Blue : Ok;
+        var status = _scanError is not null ? Warn : _scan?.HasRepairs == true ? Blue : _scan?.HasWarnings == true ? Warn : Ok;
         if (_busy) status = Blue;
         var top = Panel(StatusPanel(status));
         var metrics = new UniformGrid { Columns = 3, Margin = new Thickness(0, 0, 0, 10) };
@@ -273,7 +273,7 @@ internal sealed class MainWindow : Window
         metrics.Children.Add(Metric(T("索引", "Index"), _scan?.IndexRepairs.Count ?? 0, "session_index.jsonl"));
         metrics.Children.Add(Metric(T("UI 状态", "UI State"), _scan?.GlobalStateRepair?.Changes.Count ?? 0, ".codex-global-state.json"));
         metrics.Children.Add(Metric(T("兼容字段", "Compatibility"), _scan?.SqliteCompatibilityUpdates.Count ?? 0, T("保守禁用", "Conservative")));
-        return Page(T("会话历史修复", "Conversation History Repair"), T("修复 Codex Desktop 侧边栏标题、时间、索引和本地 UI 状态。", "Repair Codex Desktop sidebar titles, timestamps, index, and local UI state."), top, metrics, Panel(ActionPanel()));
+        return Page(T("会话历史修复", "Conversation History Repair"), T("修复 Codex Desktop 侧边栏标题、时间、索引和本地 UI 状态。", "Repair Codex Desktop sidebar titles, timestamps, index, and local UI state."), top, metrics, _scan?.HasWarnings == true ? Panel(PaginatedWarningPanel()) : new Border(), Panel(ActionPanel()));
     }
 
     private UIElement StatusPanel(WpfBrush status)
@@ -283,7 +283,7 @@ internal sealed class MainWindow : Window
         row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(48) });
         row.ColumnDefinitions.Add(new ColumnDefinition());
         row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        row.Children.Add(new Border { Width = 36, Height = 36, CornerRadius = new CornerRadius(8), Background = Alpha(status, .10), Child = Text(_scan?.HasRepairs == true ? "⌁" : "✓", 18, FontWeights.SemiBold, status, center: true) });
+        row.Children.Add(new Border { Width = 36, Height = 36, CornerRadius = new CornerRadius(8), Background = Alpha(status, .10), Child = Text(_scan?.HasRepairs == true ? "⌁" : _scan?.HasWarnings == true ? "!" : "✓", 18, FontWeights.SemiBold, status, center: true) });
         var copy = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
         copy.Children.Add(Text(StatusTitle(), 18, FontWeights.SemiBold, Ink));
         var detail = Text(StatusSubtitle(), 12, FontWeights.Normal, Muted);
@@ -327,10 +327,11 @@ internal sealed class MainWindow : Window
     private UIElement ActionPanel()
     {
         var repairs = _scan?.HasRepairs == true;
+        var warnings = _scan?.HasWarnings == true;
         var failed = _scanError is not null;
         var s = new StackPanel();
-        s.Children.Add(Text(_busy ? T("正在处理", "Working") : failed ? T("扫描遇到问题", "Scan Needs Attention") : repairs ? T("发现待修复项", "Repairs Found") : T("侧边栏状态正常", "Sidebar Looks Healthy"), 16, FontWeights.SemiBold, Ink));
-        var sub = Text(_busy ? _busyDetail : failed ? _scanError! : repairs ? T($"发现 {_scan!.PendingCount} 项侧边栏摘要问题。下一步查看变更并选择备份模式。", $"Found {_scan!.PendingCount} sidebar summary issues. Review changes and select a backup mode.") : T("当前没有待处理项。重新扫描即可检查本地历史。", "No pending items. Scan again to check local history state."), 12, FontWeights.Normal, failed ? Warn : Muted);
+        s.Children.Add(Text(_busy ? T("正在处理", "Working") : failed ? T("扫描遇到问题", "Scan Needs Attention") : repairs ? T("发现待修复项", "Repairs Found") : warnings ? T("发现分页风险", "Paginated Review Needed") : T("侧边栏状态正常", "Sidebar Looks Healthy"), 16, FontWeights.SemiBold, Ink));
+        var sub = Text(_busy ? _busyDetail : failed ? _scanError! : repairs ? T($"发现 {_scan!.PendingCount} 项侧边栏摘要问题。下一步查看变更并选择备份模式。", $"Found {_scan!.PendingCount} sidebar summary issues. Review changes and select a backup mode.") : warnings ? T($"发现 {_scan!.PaginatedProviderWarnings.Count} 个分页 Provider 不一致。Windows 本版不会直接改写其首行，请人工确认或使用 macOS 分页修复流程。", $"Found {_scan!.PaginatedProviderWarnings.Count} paginated Provider mismatches. This Windows build will not rewrite their headers; review manually or use the macOS paginated repair flow.") : T("当前没有待处理项。重新扫描即可检查本地历史。", "No pending items. Scan again to check local history state."), 12, FontWeights.Normal, failed || warnings ? Warn : Muted);
         sub.Margin = new Thickness(0, 4, 0, 14);
         sub.TextWrapping = TextWrapping.Wrap;
         s.Children.Add(sub);
@@ -352,6 +353,7 @@ internal sealed class MainWindow : Window
             (T("目标 Provider", "Target Provider"), _scan?.ProviderInfo.Provider ?? "-"),
             (_settings.AlignProvidersForVisibility ? T("对齐到当前 Provider 的 SQLite 记录", "SQLite rows aligned to active provider") : T("按 rollout 修正 Provider 的 SQLite 记录", "SQLite provider rows matched to rollout"), (_scan?.SqliteProviderUpdates.Count ?? 0).ToString()),
             (T("待对齐 rollout Provider", "Rollout providers to align"), (_scan?.RolloutRepairs.Count ?? 0).ToString()),
+            (T("分页 Provider 风险", "Paginated Provider warnings"), (_scan?.PaginatedProviderWarnings.Count ?? 0).ToString()),
             (T("待写入短标题", "Sidebar title rows"), (_scan?.SqliteTitleRepairs.Count ?? 0).ToString()),
             (T("待修复更新时间", "Timestamp rows"), ((_scan?.SqliteTimestampRepairs.Count ?? 0) + (_scan?.RolloutMtimeRepairs.Count ?? 0)).ToString()),
             (T("待重建索引条目", "Index entries to rebuild"), (_scan?.IndexRepairs.Count ?? 0).ToString()),
@@ -376,12 +378,27 @@ internal sealed class MainWindow : Window
     {
         var s = new StackPanel();
         s.Children.Add(Text(T("预览", "Preview"), 16, FontWeights.SemiBold, Ink));
-        if (_scan is not { HasRepairs: true }) { s.Children.Add(Empty("✓", T("当前没有待修复项", "No pending repairs"), T("侧边栏会话摘要状态正常。", "Sidebar conversation summaries look healthy."))); return s; }
+        if (_scan is not { HasRepairs: true } && _scan is not { HasWarnings: true }) { s.Children.Add(Empty("✓", T("当前没有待修复项", "No pending repairs"), T("侧边栏会话摘要状态正常。", "Sidebar conversation summaries look healthy."))); return s; }
         var rows = PreviewRows(_scan).Take(10).ToList();
         if (rows.Count == 0) s.Children.Add(Empty("◇", T("没有可预览的写入项", "No previewable writes"), T("确认后会先创建备份，再写入必要的侧边栏摘要数据。", "A backup is created before writing sidebar summary data.")));
         foreach (var row in rows) s.Children.Add(PreviewRow(row));
         var hidden = PreviewRows(_scan).Count - rows.Count;
         if (hidden > 0) s.Children.Add(Text(T($"还有 {hidden} 条记录未显示。", $"{hidden} more rows hidden."), 12, FontWeights.Normal, Muted));
+        return s;
+    }
+
+    private UIElement PaginatedWarningPanel()
+    {
+        var s = new StackPanel();
+        s.Children.Add(Text(T("分页 Provider 需人工确认", "Paginated Provider review required"), 15, FontWeights.SemiBold, Warn));
+        s.Children.Add(Text(T("这些 rollout 的首行长度参与 history_base 字节边界计算。Windows 版会保护文件，不会把它们混入普通 Provider 修复。", "The first-line byte length participates in history_base offsets. Windows protects these files and keeps them out of ordinary Provider repairs."), 12, FontWeights.Normal, Muted));
+        foreach (var warning in (_scan?.PaginatedProviderWarnings ?? []).Take(5))
+        {
+            var title = PreviewTitle(warning.Title, warning.ThreadId);
+            s.Children.Add(TextBlockPair(title, $"{warning.CurrentProvider} -> {warning.TargetProvider}\n{Path.GetFileName(warning.RolloutPath)}"));
+        }
+        if ((_scan?.PaginatedProviderWarnings.Count ?? 0) > 5)
+            s.Children.Add(Text(T($"还有 {(_scan?.PaginatedProviderWarnings.Count ?? 0) - 5} 个风险项未显示。", $"{(_scan?.PaginatedProviderWarnings.Count ?? 0) - 5} more warnings hidden."), 12, FontWeights.Normal, Muted));
         return s;
     }
 
@@ -489,8 +506,8 @@ internal sealed class MainWindow : Window
     }
 
     private void SaveSettings() { _settings.DefaultBackupMode = _backupMode; _settings.Save(); Notice(T("设置已保存", "Settings Saved"), T("已保存到本机配置。", "Saved to local app settings."), Ok); _ = ScanAsync(); }
-    private string StatusTitle() => _busy ? _busyTitle : _scanError is not null ? T("扫描失败", "Scan Failed") : _scan is null ? T("正在识别当前环境", "Detecting Environment") : _scan.HasRepairs ? T($"发现 {_scan.PendingCount} 项待处理", $"{_scan.PendingCount} Items Need Attention") : T("侧边栏状态正常", "Sidebar Looks Healthy");
-    private string StatusSubtitle() => _busy ? _busyDetail : _scanError is not null ? _scanError : _scan?.HasRepairs == true ? T("请查看待修复项，确认变更后执行备份并修复。", "Review pending changes, then create a backup and repair.") : T("已读取本地会话摘要。不会修改 Token、API Key、第三方 URL 或会话正文。", "Local conversation summaries are inspected. Tokens, keys, URLs, and message bodies are never changed.");
+    private string StatusTitle() => _busy ? _busyTitle : _scanError is not null ? T("扫描失败", "Scan Failed") : _scan is null ? T("正在识别当前环境", "Detecting Environment") : _scan.HasRepairs ? T($"发现 {_scan.PendingCount} 项待处理", $"{_scan.PendingCount} Items Need Attention") : _scan.HasWarnings ? T($"发现 {_scan.PaginatedProviderWarnings.Count} 个分页风险", $"{_scan.PaginatedProviderWarnings.Count} Paginated Warnings") : T("侧边栏状态正常", "Sidebar Looks Healthy");
+    private string StatusSubtitle() => _busy ? _busyDetail : _scanError is not null ? _scanError : _scan?.HasRepairs == true ? T("请查看待修复项，确认变更后执行备份并修复。", "Review pending changes, then create a backup and repair.") : _scan?.HasWarnings == true ? T("分页文件已被保护，未直接改写首行；请在待修复项中查看并人工确认。", "Paginated files are protected and their headers were not rewritten. Review them in Pending.") : T("已读取本地会话摘要。不会修改 Token、API Key、第三方 URL 或会话正文。", "Local conversation summaries are inspected. Tokens, keys, URLs, and message bodies are never changed.");
 
     private void Notice(string title, string message, WpfBrush color)
     {
@@ -628,6 +645,7 @@ internal sealed class MainWindow : Window
         var rows = new List<PreviewItem>();
         rows.AddRange(scan.SqliteProviderUpdates.Select(repair => new PreviewItem(_settings.AlignProvidersForVisibility ? T("Provider 对齐", "Provider Align") : "Provider", "▦", PreviewTitle(repair.Thread.Title, repair.Thread.Id), $"{repair.Thread.ModelProvider} -> {repair.TargetProvider}")));
         rows.AddRange(scan.RolloutRepairs.Select(repair => new PreviewItem(T("rollout Provider", "Rollout Provider"), "▣", PreviewTitle(repair.SessionId, Path.GetFileName(repair.Path)), $"{repair.CurrentProvider ?? "nil"} -> {repair.TargetProvider}")));
+        rows.AddRange(scan.PaginatedProviderWarnings.Select(warning => new PreviewItem(T("分页 Provider 风险", "Paginated Provider review"), "!", PreviewTitle(warning.Title, warning.ThreadId), $"{warning.CurrentProvider} -> {warning.TargetProvider} · {Path.GetFileName(warning.RolloutPath)}")));
         rows.AddRange(scan.SqliteTitleRepairs.Select(repair => new PreviewItem(T("标题", "Title"), "T", PreviewTitle(repair.TargetTitle, repair.ThreadId), PreviewTitle(repair.CurrentTitle, T("空标题", "empty title")))));
         rows.AddRange(scan.SqliteTimestampRepairs.Select(repair => new PreviewItem(T("时间", "Time"), "◷", PreviewTitle(repair.Title, repair.ThreadId), $"{repair.CurrentUpdatedAtMs} -> {repair.TargetUpdatedAtMs}")));
         rows.AddRange(scan.RolloutMtimeRepairs.Select(repair => new PreviewItem("mtime", "◴", PreviewTitle(repair.Title, repair.ThreadId), $"{repair.CurrentMtimeMs} -> {repair.TargetMtimeMs}")));

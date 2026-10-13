@@ -13,6 +13,18 @@ This release unifies provider-switch visibility repair, paginated-risk warnings,
 - **Scoped unknown-file blocking**: temporary, repair, and backup artifacts are ignored; an unrecognized rollout only blocks chats in its own directory.
 - **Unified risk UI**: the pending-repair and chat-repair pages now use the same status, risk, and verification-boundary cards.
 
+## Next stage: safe paginated Provider repair (v1.6.0 plan)
+
+The second-stage paginated repair path is now implemented behind an explicit confirmation flow and remains separate from the ordinary sidebar repair until release acceptance is complete. See the [implementation plan](docs/paginated-provider-repair-plan.md).
+
+- Builds a global physical-branch index and fails closed on duplicate IDs, multiple history databases, missing parents, ambiguous tips, or unexplained boundaries.
+- Recalculates descendant `history_base.end_byte_offset`, `thread_turns` offsets, and the projection cursor from the actual first-line byte delta, without concatenating or rebuilding message bodies.
+- Trials the complete change on SQLite Backup API snapshots and uniquely isolated rollout copies before touching live files.
+- Uses compare-and-swap metadata checks, body hashes, and backup recovery; it never kills a running Codex process.
+- Shows paginated diagnostics directly in the UI and offers only fully validated repairs in the separate second-stage section.
+
+This is an implementation record, not a v1.6.0 release yet. Before publishing, the project still needs the full test suite, Release build, 50-byte mid-file offset, multi-database, rollback, and post-restart client-read acceptance.
+
 ## 1.4.0: Chat Diagnosis & Entrypoint Repair (experimental, macOS)
 
 The new **Chat Repair** page addresses paginated chats whose JSONL files still exist but whose logical thread points to an older branch. It is separate from sidebar repair and available in macOS 1.4.0 only. Windows 1.4.0 retains its existing functionality without the new entrypoint repair.

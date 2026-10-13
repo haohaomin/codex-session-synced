@@ -1,4 +1,5 @@
 import AppKit
+import CryptoKit
 import Foundation
 
 public enum CodexRepairError: LocalizedError, Sendable {
@@ -18,9 +19,21 @@ public enum CodexRepairError: LocalizedError, Sendable {
 }
 
 public final class CodexRepairService {
-    public init() {}
+    private let runningCheck: () -> Bool
+
+    public convenience init() {
+        self.init(isRunning: { Self.detectCodexRunning() })
+    }
+
+    init(isRunning: @escaping () -> Bool) {
+        runningCheck = isRunning
+    }
 
     public func isCodexRunning() -> Bool {
+        runningCheck()
+    }
+
+    private static func detectCodexRunning() -> Bool {
         NSWorkspace.shared.runningApplications.contains { app in
             app.bundleIdentifier == "com.openai.codex" || app.localizedName == "Codex"
         }
@@ -53,12 +66,21 @@ public final class CodexRepairService {
         }
 
         let rolloutInfo = SidebarRepairPlanner.rolloutInfoByPath(for: threads)
+        let paginatedPlan = settings.alignProvidersForVisibility
+            ? PaginatedProviderRepairService().scan(
+                settings: settings,
+                threads: threads,
+                targetProvider: providerInfo.provider,
+                stateDatabase: state?.url
+            )
+            : PaginatedProviderScan(repairs: [], warnings: [])
+        let paginatedRepairIDs = Set(paginatedPlan.repairs.map(\.threadID))
         let paginatedProviderWarnings = settings.alignProvidersForVisibility
             ? SidebarRepairPlanner.paginatedProviderWarnings(
                 threads: threads,
                 rollouts: rolloutInfo,
                 targetProvider: providerInfo.provider
-            )
+            ).filter { !paginatedRepairIDs.contains($0.threadID) }
             : []
         let sqliteProviderUpdates: [ProviderRepair]
         let rolloutRepairs: [RolloutRepair]
@@ -66,7 +88,7 @@ public final class CodexRepairService {
             sqliteProviderUpdates = SidebarRepairPlanner.providerAlignmentRepairs(
                 threads: threads,
                 targetProvider: providerInfo.provider
-            )
+            ).filter { !paginatedRepairIDs.contains($0.thread.id) }
             rolloutRepairs = SidebarRepairPlanner.rolloutProviderAlignmentRepairs(
                 threads: threads,
                 targetProvider: providerInfo.provider
@@ -101,6 +123,8 @@ public final class CodexRepairService {
             sqliteTitleRepairs: sqliteTitleRepairs,
             rolloutMtimeRepairs: rolloutMtimeRepairs,
             paginatedProviderWarnings: paginatedProviderWarnings,
+            paginatedProviderRepairs: paginatedPlan.repairs,
+            paginatedProviderDiagnostics: paginatedPlan.warnings,
             globalStateRepair: globalStateRepair,
             backups: backups,
             codexHome: codexHome,
@@ -129,6 +153,82 @@ public final class CodexRepairService {
         }
         if !scan.indexRepairs.isEmpty {
             try SidebarRepairPlanner.rebuildSessionIndex(scan.indexRepairs, codexHome: scan.codexHome)
+        }
+        try rotateBackups(codexHome: scan.codexHome, mode: mode, limit: mode == .full ? settings.fullLimit : settings.lightweightLimit)
+        return backup
+    }
+
+    /// Explicit second-stage operation for a fully planned paginated Provider
+    /// repair. It is deliberately separate from repair(scan:) so the ordinary
+    /// sidebar button can never leave a paginated thread half-updated.
+    public func repairPaginated(_ repair: PaginatedProviderRepair, scan: ScanResult, settings: AppSettings, mode: BackupMode) throws -> BackupRecord {
+        guard !isCodexRunning() else { throw CodexRepairError.codexIsRunning }
+        guard let state = scan.stateDatabase,
+              let thread = scan.threads.first(where: { $0.id == repair.threadID }),
+              scan.paginatedProviderRepairs.first(where: { $0 == repair }) != nil else {
+            throw HistoryRepairError.stale
+        }
+        let fresh = try self.scan(settings: settings)
+        guard let current = fresh.paginatedProviderRepairs.first(where: { $0.threadID == repair.threadID }) else {
+            throw HistoryRepairError.stale
+        }
+        guard current == repair else { throw HistoryRepairError.stale }
+
+        let extraURLs = repair.rolloutRepairs.map(\.url)
+        let backup = try createBackup(scan: scan, settings: settings, mode: mode, extraRolloutURLs: extraURLs)
+        let backupURL = URL(fileURLWithPath: backup.path)
+        let trialRoot = backupURL.appendingPathComponent("paginated-trial", isDirectory: true)
+        try FileUtilities.ensureDirectory(trialRoot)
+        defer { try? FileManager.default.removeItem(at: trialRoot) }
+
+        let stateSnapshot = trialRoot.appendingPathComponent("state.sqlite")
+        let historySnapshot = trialRoot.appendingPathComponent("thread_history.sqlite")
+        let trialRollouts = trialRoot.appendingPathComponent("rollouts", isDirectory: true)
+        try FileUtilities.ensureDirectory(trialRollouts)
+        try SQLiteDatabase(path: state.url.path, readonly: true).backup(to: stateSnapshot)
+        try SQLiteDatabase(path: repair.historyDatabase.path, readonly: true).backup(to: historySnapshot)
+        let providerRepair = ProviderRepair(thread: thread, targetProvider: repair.targetProvider)
+        let trialState = try SQLiteDatabase(path: stateSnapshot.path, readonly: false)
+        try trialState.updateProvidersCompareAndSwap([providerRepair])
+        let trialHistory = try SQLiteDatabase(path: historySnapshot.path, readonly: false)
+        try trialHistory.updatePaginatedTurnOffsets(repair.turnOffsetRepairs)
+        for projection in repair.projectionOffsetRepairs { try trialHistory.updatePaginatedProjectionOffset(projection) }
+
+        let trialFiles = try repair.rolloutRepairs.enumerated().map { index, item -> PaginatedRolloutRepair in
+            let destinationDirectory = trialRollouts.appendingPathComponent(String(format: "%03d-%@", index, item.physicalID), isDirectory: true)
+            try FileUtilities.ensureDirectory(destinationDirectory)
+            let destination = destinationDirectory.appendingPathComponent(item.url.lastPathComponent)
+            try FileManager.default.copyItem(at: item.url, to: destination)
+            var copy = item
+            copy.url = destination
+            return copy
+        }
+        let trialRepair = PaginatedProviderRepair(threadID: repair.threadID, title: repair.title, targetProvider: repair.targetProvider, currentSQLiteProvider: repair.currentSQLiteProvider, stateDatabase: stateSnapshot, historyDatabase: historySnapshot, rolloutRepairs: trialFiles, turnOffsetRepairs: repair.turnOffsetRepairs, projectionOffsetRepairs: repair.projectionOffsetRepairs)
+        let planner = PaginatedProviderRepairService()
+        try planner.applyRollouts(trialRepair)
+        try SQLiteDatabase(path: stateSnapshot.path, readonly: true).checkIntegrity()
+        try SQLiteDatabase(path: historySnapshot.path, readonly: true).checkIntegrity()
+
+        var bodyHashes: [String: Data] = [:]
+        for item in repair.rolloutRepairs { bodyHashes[item.url.standardizedFileURL.path] = try rolloutBodyHash(item.url) }
+        do {
+            try planner.applyRollouts(repair)
+            try SQLiteDatabase(path: state.url.path, readonly: false).updateProvidersCompareAndSwap([providerRepair])
+            let history = try SQLiteDatabase(path: repair.historyDatabase.path, readonly: false)
+            try history.updatePaginatedTurnOffsets(repair.turnOffsetRepairs)
+            for projection in repair.projectionOffsetRepairs { try history.updatePaginatedProjectionOffset(projection) }
+            for item in repair.rolloutRepairs {
+                guard try rolloutBodyHash(item.url) == bodyHashes[item.url.standardizedFileURL.path] else {
+                    throw HistoryRepairError.unsafe("rollout 正文发生变化 / Rollout body changed")
+                }
+            }
+            let verified = try self.scan(settings: settings)
+            guard !verified.paginatedProviderRepairs.contains(where: { $0.threadID == repair.threadID }) else {
+                throw HistoryRepairError.unsafe("分页 Provider 修复未收敛 / Paginated Provider repair did not converge")
+            }
+        } catch {
+            try? restore(backup: backup)
+            throw error
         }
         try rotateBackups(codexHome: scan.codexHome, mode: mode, limit: mode == .full ? settings.fullLimit : settings.lightweightLimit)
         return backup
@@ -186,6 +286,22 @@ public final class CodexRepairService {
         }
         .sorted { $0.modifiedAt > $1.modifiedAt }
         .first
+    }
+
+    private func rolloutBodyHash(_ url: URL) throws -> Data {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        var pending = Data()
+        while let chunk = try handle.read(upToCount: 64 * 1024), !chunk.isEmpty {
+            pending.append(chunk)
+            if let newline = pending.firstIndex(of: 10) {
+                try handle.seek(toOffset: UInt64(newline + 1))
+                break
+            }
+        }
+        var digest = SHA256()
+        while let chunk = try handle.read(upToCount: 1024 * 1024), !chunk.isEmpty { digest.update(data: chunk) }
+        return Data(digest.finalize())
     }
 
 }

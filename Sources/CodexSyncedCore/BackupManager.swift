@@ -20,7 +20,7 @@ extension CodexRepairService {
         .sorted { $0.createdAt > $1.createdAt }
     }
 
-    func createBackup(scan: ScanResult, settings: AppSettings, mode: BackupMode) throws -> BackupRecord {
+    func createBackup(scan: ScanResult, settings: AppSettings, mode: BackupMode, extraRolloutURLs: [URL] = []) throws -> BackupRecord {
         let now = Date()
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyyMMdd-HHmmss"
@@ -72,9 +72,15 @@ extension CodexRepairService {
             try copyDirectoryIfExists(scan.codexHome.appendingPathComponent("archived_sessions"), to: directory.appendingPathComponent("codex/archived_sessions"))
         }
 
-        let firstLines = scan.rolloutRepairs.map {
-            BackupManifest.FirstLineItem(originalPath: $0.url.path, firstLine: $0.originalFirstLine)
+        var firstLineByPath: [String: BackupManifest.FirstLineItem] = [:]
+        for repair in scan.rolloutRepairs {
+            firstLineByPath[repair.url.standardizedFileURL.path] = BackupManifest.FirstLineItem(originalPath: repair.url.path, firstLine: repair.originalFirstLine)
         }
+        for url in extraRolloutURLs {
+            guard let firstLine = firstLine(url: url) else { continue }
+            firstLineByPath[url.standardizedFileURL.path] = BackupManifest.FirstLineItem(originalPath: url.path, firstLine: firstLine)
+        }
+        let firstLines = Array(firstLineByPath.values).sorted { $0.originalPath < $1.originalPath }
         let mtimes = scan.rolloutMtimeRepairs.map {
             BackupManifest.MtimeItem(originalPath: $0.rolloutPath, modifiedAtMs: $0.currentMtimeMs)
         }
@@ -128,6 +134,21 @@ extension CodexRepairService {
             return [active] + candidates
         }
         return candidates
+    }
+
+    private func firstLine(url: URL) -> String? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        var data = Data()
+        while let chunk = try? handle.read(upToCount: 64 * 1024) {
+            guard !chunk.isEmpty else { break }
+            data.append(chunk)
+            if let newline = data.firstIndex(of: 10) {
+                let line = data[..<newline]
+                return String(data: line.last == 13 ? line.dropLast() : line, encoding: .utf8)
+            }
+        }
+        return String(data: data, encoding: .utf8)
     }
 
     private func copyDirectoryIfExists(_ source: URL, to destination: URL) throws {

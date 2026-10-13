@@ -218,6 +218,131 @@ struct CodexSyncedCoreTests {
         #expect(RolloutRepairer.makeRepair(url: rollout, targetProvider: "custom") == nil)
     }
 
+    @Test func paginatedProviderPlannerRecalculatesDescendantAndHistoryOffsets() throws {
+        let directory = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let sessions = directory.appendingPathComponent("sessions/2026/10/14")
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+        let history = directory.appendingPathComponent("thread_history_1.sqlite")
+        let state = directory.appendingPathComponent("state_1.sqlite")
+        let logical = "00000000-0000-0000-0000-000000000101"
+        let branch = "00000000-0000-0000-0000-000000000102"
+        let root = sessions.appendingPathComponent("rollout-2026-10-14T00-00-00-\(logical).jsonl")
+        let child = sessions.appendingPathComponent("rollout-2026-10-14T00-01-00-\(logical)_\(branch).jsonl")
+        let rootMeta = "{\"ordinal\":0,\"type\":\"session_meta\",\"payload\":{\"id\":\"\(logical)\",\"history_mode\":\"paginated\",\"model_provider\":\"openai\"}}\n"
+        let rootMessage = "{\"ordinal\":1,\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"root\"}]}}\n"
+        let childMeta = "{\"ordinal\":2,\"type\":\"session_meta\",\"payload\":{\"id\":\"\(logical)\",\"history_mode\":\"paginated\",\"history_base\":{\"thread_id\":\"\(logical)\",\"end_ordinal_exclusive\":2,\"end_byte_offset\":\(rootMeta.utf8.count + rootMessage.utf8.count)},\"model_provider\":\"openai\"}}\n"
+        let childMessage = "{\"ordinal\":3,\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"child\"}]}}\n"
+        #expect((try? JSONSerialization.jsonObject(with: Data(rootMeta.utf8))) != nil)
+        #expect((try? JSONSerialization.jsonObject(with: Data(childMeta.utf8))) != nil)
+        try (rootMeta + rootMessage).write(to: root, atomically: true, encoding: .utf8)
+        try (childMeta + childMessage).write(to: child, atomically: true, encoding: .utf8)
+        var handle: OpaquePointer?
+        #expect(sqlite3_open(state.path, &handle) == SQLITE_OK)
+        #expect(sqlite3_exec(handle, "CREATE TABLE threads(id TEXT PRIMARY KEY, rollout_path TEXT, model_provider TEXT, history_mode TEXT, title TEXT); INSERT INTO threads VALUES('\(logical)','\(root.path)','custom','paginated','planner');", nil, nil, nil) == SQLITE_OK)
+        sqlite3_close(handle)
+        #expect(sqlite3_open(history.path, &handle) == SQLITE_OK)
+        let turnStart = Int64(rootMeta.utf8.count)
+        let boundary = Int64((rootMeta + rootMessage).utf8.count)
+        #expect(sqlite3_exec(handle, "CREATE TABLE thread_turns(thread_id TEXT, turn_id TEXT, rollout_ordinal INTEGER, rollout_byte_offset INTEGER, rollout_end_ordinal INTEGER, rollout_end_byte_offset INTEGER, PRIMARY KEY(thread_id,turn_id)); INSERT INTO thread_turns VALUES('\(logical)','turn-1',1,\(turnStart),2,\(boundary)); CREATE TABLE thread_history_projection_state(thread_id TEXT PRIMARY KEY, next_rollout_byte_offset INTEGER, next_rollout_ordinal INTEGER); INSERT INTO thread_history_projection_state VALUES('\(logical)',\(boundary),2);", nil, nil, nil) == SQLITE_OK)
+        sqlite3_close(handle)
+
+        let settings = AppSettings(language: .en, codexHome: directory, sqliteHome: directory, defaultBackupMode: .lightweight, lightweightLimit: 5, fullLimit: 3, openCodexAfterRepair: false)
+        let thread = ThreadRow(id: logical, rolloutPath: root.path, title: "planner", modelProvider: "custom", hasUserEvent: true, cwd: directory.path, source: "vscode", threadSource: "user", archived: false, updatedAt: 1, updatedAtMs: 1000, firstUserMessage: "root", preview: "root")
+        let targetProvider = String(repeating: "x", count: 56) // openai -> target is an exact 50-byte header delta.
+        let result = PaginatedProviderRepairService().scan(settings: settings, threads: [thread], targetProvider: targetProvider, stateDatabase: state)
+        if result.repairs.isEmpty { print("planner warnings: \(result.warnings.joined(separator: " | "))") }
+        #expect(result.repairs.count == 1)
+        let repair = try #require(result.repairs.first)
+        #expect(result.warnings.isEmpty)
+        #expect(repair.rolloutRepairs.count == 2)
+        #expect(repair.turnOffsetRepairs.count == 1)
+        #expect(repair.projectionOffsetRepairs.count == 1)
+        #expect(repair.turnOffsetRepairs[0].targetStartOffset - repair.turnOffsetRepairs[0].currentStartOffset == 50)
+        #expect(repair.projectionOffsetRepairs[0].targetOffset - repair.projectionOffsetRepairs[0].currentOffset == 50)
+        #expect(repair.turnOffsetRepairs[0].targetStartOffset > repair.turnOffsetRepairs[0].currentStartOffset)
+        #expect(repair.projectionOffsetRepairs[0].targetOffset > repair.projectionOffsetRepairs[0].currentOffset)
+
+        let rootBytes = try Data(contentsOf: root)
+        let childBytes = try Data(contentsOf: child)
+        try PaginatedProviderRepairService().applyRollouts(repair)
+        let currentRoot = try Data(contentsOf: root)
+        let currentChild = try Data(contentsOf: child)
+        let rootSuffix = rootBytes[(rootBytes.firstIndex(of: 10)! + 1)...]
+        let currentRootSuffix = currentRoot[(currentRoot.firstIndex(of: 10)! + 1)...]
+        let childSuffix = childBytes[(childBytes.firstIndex(of: 10)! + 1)...]
+        let currentChildSuffix = currentChild[(currentChild.firstIndex(of: 10)! + 1)...]
+        #expect(Data(currentRootSuffix) == Data(rootSuffix))
+        #expect(Data(currentChildSuffix) == Data(childSuffix))
+        let childHeader = try JSONSerialization.jsonObject(with: Data((try String(contentsOf: child, encoding: .utf8)).split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)[0].utf8)) as? [String: Any]
+        let payload = childHeader?["payload"] as? [String: Any]
+        let base = payload?["history_base"] as? [String: Any]
+        #expect((base?["end_byte_offset"] as? NSNumber)?.int64Value == repair.turnOffsetRepairs[0].targetEndOffset)
+    }
+
+    @Test func paginatedProviderRepairUpdatesRolloutsAndSQLiteOffsetsWithBackup() throws {
+        let directory = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let sessions = directory.appendingPathComponent("sessions/2026/10/14")
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+        try "model_provider = \"custom-long\"\n".write(to: directory.appendingPathComponent("config.toml"), atomically: true, encoding: .utf8)
+        let history = directory.appendingPathComponent("thread_history_1.sqlite")
+        let state = directory.appendingPathComponent("state_1.sqlite")
+        let logical = "00000000-0000-0000-0000-000000000111"
+        let branch = "00000000-0000-0000-0000-000000000112"
+        let root = sessions.appendingPathComponent("rollout-2026-10-14T00-00-00-\(logical).jsonl")
+        let child = sessions.appendingPathComponent("rollout-2026-10-14T00-01-00-\(logical)_\(branch).jsonl")
+        let rootMeta = "{\"ordinal\":0,\"type\":\"session_meta\",\"payload\":{\"id\":\"\(logical)\",\"history_mode\":\"paginated\",\"model_provider\":\"openai\"}}\n"
+        let rootMessage = "{\"ordinal\":1,\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"root\"}]}}\n"
+        let childMeta = "{\"ordinal\":2,\"type\":\"session_meta\",\"payload\":{\"id\":\"\(logical)\",\"history_mode\":\"paginated\",\"history_base\":{\"thread_id\":\"\(logical)\",\"end_ordinal_exclusive\":2,\"end_byte_offset\":\(rootMeta.utf8.count + rootMessage.utf8.count)},\"model_provider\":\"openai\"}}\n"
+        let childMessage = "{\"ordinal\":3,\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"child\"}]}}\n"
+        try (rootMeta + rootMessage).write(to: root, atomically: true, encoding: .utf8)
+        try (childMeta + childMessage).write(to: child, atomically: true, encoding: .utf8)
+        let originalRootBytes = try Data(contentsOf: root)
+        let originalChildBytes = try Data(contentsOf: child)
+        let turnStart = Int64(rootMeta.utf8.count)
+        let boundary = Int64((rootMeta + rootMessage).utf8.count)
+
+        var handle: OpaquePointer?
+        #expect(sqlite3_open(state.path, &handle) == SQLITE_OK)
+        let stateSQL = """
+        CREATE TABLE threads(id TEXT PRIMARY KEY, rollout_path TEXT, model_provider TEXT, history_mode TEXT, title TEXT, has_user_event INTEGER, cwd TEXT, thread_source TEXT, archived INTEGER, updated_at INTEGER, first_user_message TEXT, preview TEXT, created_at INTEGER, created_at_ms INTEGER, updated_at_ms INTEGER, recency_at INTEGER, recency_at_ms INTEGER);
+        INSERT INTO threads VALUES('\(logical)','\(root.path)','custom','paginated','repair',1,'\(directory.path)','user',0,1,'root','root',1,1000,1000,1,1000);
+        """
+        #expect(sqlite3_exec(handle, stateSQL, nil, nil, nil) == SQLITE_OK)
+        sqlite3_close(handle)
+        #expect(sqlite3_open(history.path, &handle) == SQLITE_OK)
+        let historySQL = """
+        CREATE TABLE thread_turns(thread_id TEXT, turn_id TEXT, rollout_ordinal INTEGER, rollout_byte_offset INTEGER, rollout_end_ordinal INTEGER, rollout_end_byte_offset INTEGER, PRIMARY KEY(thread_id,turn_id));
+        INSERT INTO thread_turns VALUES('\(logical)','turn-1',1,\(turnStart),2,\(boundary));
+        CREATE TABLE thread_history_projection_state(thread_id TEXT PRIMARY KEY, next_rollout_byte_offset INTEGER, next_rollout_ordinal INTEGER);
+        INSERT INTO thread_history_projection_state VALUES('\(logical)',\(boundary),2);
+        """
+        #expect(sqlite3_exec(handle, historySQL, nil, nil, nil) == SQLITE_OK)
+        sqlite3_close(handle)
+
+        let settings = AppSettings(language: .en, codexHome: directory, sqliteHome: directory, defaultBackupMode: .lightweight, lightweightLimit: 5, fullLimit: 3, openCodexAfterRepair: false)
+        let thread = ThreadRow(id: logical, rolloutPath: root.path, title: "repair", modelProvider: "custom", hasUserEvent: true, cwd: directory.path, source: "vscode", threadSource: "user", archived: false, updatedAt: 1, updatedAtMs: 1000, firstUserMessage: "root", preview: "root")
+        let planner = PaginatedProviderRepairService()
+        let plan = try #require(planner.scan(settings: settings, threads: [thread], targetProvider: "custom-long", stateDatabase: state).repairs.first)
+        let scan = ScanResult(providerInfo: ProviderInfo(provider: "custom-long", authLabel: "Custom", configURL: directory.appendingPathComponent("config.toml")), stateDatabase: StateDatabase(url: state, modifiedAt: Date()), threads: [thread], sqliteProviderUpdates: [], sqliteCompatibilityUpdates: [], rolloutRepairs: [], indexRepairs: [], sqliteTimestampRepairs: [], sqliteTitleRepairs: [], rolloutMtimeRepairs: [], paginatedProviderRepairs: [plan], globalStateRepair: nil, backups: [], codexHome: directory, sqliteHome: directory, lastRepairAt: nil)
+        let backup = try CodexRepairService(isRunning: { false }).repairPaginated(plan, scan: scan, settings: settings, mode: .lightweight)
+        #expect(FileManager.default.fileExists(atPath: backup.path))
+        #expect(try SQLiteDatabase(path: state.path, readonly: true).queryThreads().first?.modelProvider == "custom-long")
+        #expect(try SQLiteDatabase(path: history.path, readonly: true).paginatedTurnRows(threadID: logical).first?.rolloutByteOffset == plan.turnOffsetRepairs.first?.targetStartOffset)
+        #expect(try SQLiteDatabase(path: history.path, readonly: true).paginatedProjectionRow(threadID: logical)?.nextRolloutByteOffset == plan.projectionOffsetRepairs.first?.targetOffset)
+        let verified = PaginatedProviderRepairService().scan(settings: settings, threads: [ThreadRow(id: logical, rolloutPath: root.path, title: "repair", modelProvider: "custom-long", hasUserEvent: true, cwd: directory.path, source: "vscode", threadSource: "user", archived: false, updatedAt: 1, updatedAtMs: 1000, firstUserMessage: "root", preview: "root")], targetProvider: "custom-long", stateDatabase: state)
+        #expect(verified.repairs.isEmpty)
+
+        // The same manifest must be sufficient to restore both databases and every
+        // rewritten paginated header without replacing unrelated files wholesale.
+        try CodexRepairService(isRunning: { false }).restore(backup: backup)
+        #expect(try SQLiteDatabase(path: state.path, readonly: true).queryThreads().first?.modelProvider == "custom")
+        #expect(try SQLiteDatabase(path: history.path, readonly: true).paginatedTurnRows(threadID: logical).first?.rolloutByteOffset == turnStart)
+        #expect(try Data(contentsOf: root) == originalRootBytes)
+        #expect(try Data(contentsOf: child) == originalChildBytes)
+    }
+
     @Test func titleRepairRemovesToolSyntaxAndUsesConversationPreview() throws {
         let directory = try makeTempDirectory()
         let rollout = directory.appendingPathComponent("rollout-title.jsonl")

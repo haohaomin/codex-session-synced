@@ -15,6 +15,21 @@ enum SQLiteError: LocalizedError {
     }
 }
 
+struct PaginatedTurnRow: Equatable, Sendable {
+    let threadID: String
+    let turnID: String
+    let rolloutOrdinal: Int64
+    let rolloutByteOffset: Int64
+    let rolloutEndOrdinal: Int64?
+    let rolloutEndByteOffset: Int64?
+}
+
+struct PaginatedProjectionRow: Equatable, Sendable {
+    let threadID: String
+    let nextRolloutByteOffset: Int64
+    let nextRolloutOrdinal: Int64
+}
+
 final class SQLiteDatabase {
     private var handle: OpaquePointer?
 
@@ -238,6 +253,134 @@ final class SQLiteDatabase {
         }
     }
 
+    func updateProvidersCompareAndSwap(_ repairs: [ProviderRepair]) throws {
+        guard !repairs.isEmpty else { return }
+        try execute("BEGIN IMMEDIATE")
+        do {
+            let sql = "UPDATE threads SET model_provider = ? WHERE id = ? AND model_provider = ?"
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw SQLiteError.prepareFailed(errorMessage)
+            }
+            defer { sqlite3_finalize(statement) }
+            for repair in repairs {
+                sqlite3_reset(statement)
+                sqlite3_clear_bindings(statement)
+                bind(repair.targetProvider, to: statement, index: 1)
+                bind(repair.thread.id, to: statement, index: 2)
+                bind(repair.thread.modelProvider, to: statement, index: 3)
+                guard sqlite3_step(statement) == SQLITE_DONE, sqlite3_changes(handle) == 1 else {
+                    throw HistoryRepairError.stale
+                }
+            }
+            try execute("COMMIT")
+        } catch {
+            try? execute("ROLLBACK")
+            throw error
+        }
+    }
+
+    func paginatedTurnRows(threadID: String) throws -> [PaginatedTurnRow] {
+        guard try tableColumns("thread_turns").isSuperset(of: ["thread_id", "turn_id", "rollout_ordinal", "rollout_byte_offset", "rollout_end_ordinal", "rollout_end_byte_offset"]) else {
+            throw HistoryRepairError.unsafe("thread_turns schema is missing rollout offsets / thread_turns 缺少分页偏移字段")
+        }
+        var statement: OpaquePointer?
+        let sql = "SELECT thread_id, turn_id, rollout_ordinal, rollout_byte_offset, rollout_end_ordinal, rollout_end_byte_offset FROM thread_turns WHERE thread_id = ? ORDER BY rollout_ordinal, turn_id"
+        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+            throw SQLiteError.prepareFailed(errorMessage)
+        }
+        defer { sqlite3_finalize(statement) }
+        bind(threadID, to: statement, index: 1)
+        var rows: [PaginatedTurnRow] = []
+        var step = sqlite3_step(statement)
+        while step == SQLITE_ROW {
+            rows.append(PaginatedTurnRow(
+                threadID: text(statement, 0),
+                turnID: text(statement, 1),
+                rolloutOrdinal: sqlite3_column_int64(statement, 2),
+                rolloutByteOffset: sqlite3_column_int64(statement, 3),
+                rolloutEndOrdinal: nullableInt64(statement, 4),
+                rolloutEndByteOffset: nullableInt64(statement, 5)
+            ))
+            step = sqlite3_step(statement)
+        }
+        guard step == SQLITE_DONE else { throw SQLiteError.stepFailed(errorMessage) }
+        return rows
+    }
+
+    func paginatedProjectionRow(threadID: String) throws -> PaginatedProjectionRow? {
+        guard try tableColumns("thread_history_projection_state").isSuperset(of: ["thread_id", "next_rollout_byte_offset", "next_rollout_ordinal"]) else {
+            throw HistoryRepairError.unsafe("projection state schema is missing rollout offsets / projection state 缺少分页偏移字段")
+        }
+        var statement: OpaquePointer?
+        let sql = "SELECT thread_id, next_rollout_byte_offset, next_rollout_ordinal FROM thread_history_projection_state WHERE thread_id = ?"
+        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+            throw SQLiteError.prepareFailed(errorMessage)
+        }
+        defer { sqlite3_finalize(statement) }
+        bind(threadID, to: statement, index: 1)
+        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+        return PaginatedProjectionRow(threadID: text(statement, 0), nextRolloutByteOffset: sqlite3_column_int64(statement, 1), nextRolloutOrdinal: sqlite3_column_int64(statement, 2))
+    }
+
+    func updatePaginatedTurnOffsets(_ repairs: [PaginatedTurnOffsetRepair]) throws {
+        guard !repairs.isEmpty else { return }
+        try execute("BEGIN IMMEDIATE")
+        do {
+            let sql = """
+            UPDATE thread_turns
+            SET rollout_byte_offset = ?, rollout_end_byte_offset = ?
+            WHERE thread_id = ? AND turn_id = ? AND rollout_byte_offset = ?
+              AND ((rollout_end_byte_offset IS NULL AND ? IS NULL) OR rollout_end_byte_offset = ?)
+            """
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw SQLiteError.prepareFailed(errorMessage)
+            }
+            defer { sqlite3_finalize(statement) }
+            for repair in repairs {
+                sqlite3_reset(statement)
+                sqlite3_clear_bindings(statement)
+                sqlite3_bind_int64(statement, 1, repair.targetStartOffset)
+                bindOptional(repair.targetEndOffset, to: statement, index: 2)
+                bind(repair.threadID, to: statement, index: 3)
+                bind(repair.turnID, to: statement, index: 4)
+                sqlite3_bind_int64(statement, 5, repair.currentStartOffset)
+                bindOptional(repair.currentEndOffset, to: statement, index: 6)
+                bindOptional(repair.currentEndOffset, to: statement, index: 7)
+                guard sqlite3_step(statement) == SQLITE_DONE, sqlite3_changes(handle) == 1 else {
+                    throw HistoryRepairError.stale
+                }
+            }
+            try execute("COMMIT")
+        } catch {
+            try? execute("ROLLBACK")
+            throw error
+        }
+    }
+
+    func updatePaginatedProjectionOffset(_ repair: PaginatedProjectionOffsetRepair) throws {
+        try execute("BEGIN IMMEDIATE")
+        do {
+            var statement: OpaquePointer?
+            let sql = "UPDATE thread_history_projection_state SET next_rollout_byte_offset = ? WHERE thread_id = ? AND next_rollout_byte_offset = ?"
+            guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw SQLiteError.prepareFailed(errorMessage)
+            }
+            defer { sqlite3_finalize(statement) }
+            sqlite3_bind_int64(statement, 1, repair.targetOffset)
+            bind(repair.threadID, to: statement, index: 2)
+            sqlite3_bind_int64(statement, 3, repair.currentOffset)
+            guard sqlite3_step(statement) == SQLITE_DONE, sqlite3_changes(handle) == 1 else {
+                throw HistoryRepairError.stale
+            }
+            try execute("COMMIT")
+        } catch {
+            try? execute("ROLLBACK")
+            throw error
+        }
+    }
+
     func updateTimestamps(_ repairs: [TimestampRepair]) throws {
         guard !repairs.isEmpty else { return }
         let columns = try tableColumns("threads")
@@ -400,6 +543,14 @@ final class SQLiteDatabase {
 
     private func bind(_ value: String, to statement: OpaquePointer?, index: Int32) {
         sqlite3_bind_text(statement, index, value, -1, SQLITE_TRANSIENT)
+    }
+
+    private func bindOptional(_ value: Int64?, to statement: OpaquePointer?, index: Int32) {
+        if let value {
+            sqlite3_bind_int64(statement, index, value)
+        } else {
+            sqlite3_bind_null(statement, index)
+        }
     }
 }
 

@@ -297,6 +297,89 @@ public struct PaginatedProviderWarning: Identifiable, Equatable, Codable, Sendab
     }
 }
 
+public struct PaginatedRolloutRepair: Identifiable, Equatable, Sendable {
+    public var id: String { url.path }
+    public var url: URL
+    public var originalFirstLine: String
+    public var repairedFirstLine: String
+    public var originalByteLength: Int64
+    public var repairedByteLength: Int64
+    public var byteDelta: Int64 { repairedByteLength - originalByteLength }
+    public var logicalID: String
+    public var physicalID: String
+
+    public init(url: URL, originalFirstLine: String, repairedFirstLine: String, originalByteLength: Int64, repairedByteLength: Int64, logicalID: String, physicalID: String) {
+        self.url = url
+        self.originalFirstLine = originalFirstLine
+        self.repairedFirstLine = repairedFirstLine
+        self.originalByteLength = originalByteLength
+        self.repairedByteLength = repairedByteLength
+        self.logicalID = logicalID
+        self.physicalID = physicalID
+    }
+}
+
+public struct PaginatedTurnOffsetRepair: Identifiable, Equatable, Sendable {
+    public var id: String { "\(threadID):\(turnID)" }
+    public var threadID: String
+    public var turnID: String
+    public var currentStartOffset: Int64
+    public var targetStartOffset: Int64
+    public var currentEndOffset: Int64?
+    public var targetEndOffset: Int64?
+
+    public init(threadID: String, turnID: String, currentStartOffset: Int64, targetStartOffset: Int64, currentEndOffset: Int64?, targetEndOffset: Int64?) {
+        self.threadID = threadID
+        self.turnID = turnID
+        self.currentStartOffset = currentStartOffset
+        self.targetStartOffset = targetStartOffset
+        self.currentEndOffset = currentEndOffset
+        self.targetEndOffset = targetEndOffset
+    }
+}
+
+public struct PaginatedProjectionOffsetRepair: Identifiable, Equatable, Sendable {
+    public var id: String { threadID }
+    public var threadID: String
+    public var currentOffset: Int64
+    public var targetOffset: Int64
+
+    public init(threadID: String, currentOffset: Int64, targetOffset: Int64) {
+        self.threadID = threadID
+        self.currentOffset = currentOffset
+        self.targetOffset = targetOffset
+    }
+}
+
+public struct PaginatedProviderRepair: Identifiable, Equatable, Sendable {
+    public var id: String { threadID }
+    public var threadID: String
+    public var title: String
+    public var targetProvider: String
+    public var currentSQLiteProvider: String
+    public var stateDatabase: URL
+    public var historyDatabase: URL
+    public var rolloutRepairs: [PaginatedRolloutRepair]
+    public var turnOffsetRepairs: [PaginatedTurnOffsetRepair]
+    public var projectionOffsetRepairs: [PaginatedProjectionOffsetRepair]
+
+    public init(threadID: String, title: String, targetProvider: String, currentSQLiteProvider: String = "", stateDatabase: URL, historyDatabase: URL, rolloutRepairs: [PaginatedRolloutRepair], turnOffsetRepairs: [PaginatedTurnOffsetRepair], projectionOffsetRepairs: [PaginatedProjectionOffsetRepair]) {
+        self.threadID = threadID
+        self.title = title
+        self.targetProvider = targetProvider
+        self.currentSQLiteProvider = currentSQLiteProvider
+        self.stateDatabase = stateDatabase
+        self.historyDatabase = historyDatabase
+        self.rolloutRepairs = rolloutRepairs
+        self.turnOffsetRepairs = turnOffsetRepairs
+        self.projectionOffsetRepairs = projectionOffsetRepairs
+    }
+
+    public var isMeaningful: Bool {
+        !rolloutRepairs.isEmpty || !turnOffsetRepairs.isEmpty || !projectionOffsetRepairs.isEmpty
+    }
+}
+
 public struct GlobalStateRepair: Equatable, Codable, Sendable {
     public var changes: [String]
     public var repairedJSON: String
@@ -319,6 +402,8 @@ public struct ScanResult: Equatable, Sendable {
     public var sqliteTitleRepairs: [TitleRepair]
     public var rolloutMtimeRepairs: [RolloutMtimeRepair]
     public var paginatedProviderWarnings: [PaginatedProviderWarning]
+    public var paginatedProviderRepairs: [PaginatedProviderRepair]
+    public var paginatedProviderDiagnostics: [String]
     public var globalStateRepair: GlobalStateRepair?
     public var backups: [BackupRecord]
     public var codexHome: URL
@@ -336,7 +421,7 @@ public struct ScanResult: Equatable, Sendable {
             globalStateRepair != nil
     }
 
-    public init(providerInfo: ProviderInfo, stateDatabase: StateDatabase?, threads: [ThreadRow], sqliteProviderUpdates: [ProviderRepair], sqliteCompatibilityUpdates: [ThreadRow], rolloutRepairs: [RolloutRepair], indexRepairs: [IndexRepair], sqliteTimestampRepairs: [TimestampRepair], sqliteTitleRepairs: [TitleRepair], rolloutMtimeRepairs: [RolloutMtimeRepair], paginatedProviderWarnings: [PaginatedProviderWarning] = [], globalStateRepair: GlobalStateRepair?, backups: [BackupRecord], codexHome: URL, sqliteHome: URL, lastRepairAt: Date?) {
+    public init(providerInfo: ProviderInfo, stateDatabase: StateDatabase?, threads: [ThreadRow], sqliteProviderUpdates: [ProviderRepair], sqliteCompatibilityUpdates: [ThreadRow], rolloutRepairs: [RolloutRepair], indexRepairs: [IndexRepair], sqliteTimestampRepairs: [TimestampRepair], sqliteTitleRepairs: [TitleRepair], rolloutMtimeRepairs: [RolloutMtimeRepair], paginatedProviderWarnings: [PaginatedProviderWarning] = [], paginatedProviderRepairs: [PaginatedProviderRepair] = [], paginatedProviderDiagnostics: [String] = [], globalStateRepair: GlobalStateRepair?, backups: [BackupRecord], codexHome: URL, sqliteHome: URL, lastRepairAt: Date?) {
         self.providerInfo = providerInfo
         self.stateDatabase = stateDatabase
         self.threads = threads
@@ -348,6 +433,8 @@ public struct ScanResult: Equatable, Sendable {
         self.sqliteTitleRepairs = sqliteTitleRepairs
         self.rolloutMtimeRepairs = rolloutMtimeRepairs
         self.paginatedProviderWarnings = paginatedProviderWarnings
+        self.paginatedProviderRepairs = paginatedProviderRepairs
+        self.paginatedProviderDiagnostics = paginatedProviderDiagnostics
         self.globalStateRepair = globalStateRepair
         self.backups = backups
         self.codexHome = codexHome

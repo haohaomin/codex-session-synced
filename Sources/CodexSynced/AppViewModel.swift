@@ -180,6 +180,62 @@ final class AppViewModel: ObservableObject {
         }
     }
 
+    func repairPaginated(_ repair: PaginatedProviderRepair) async {
+        guard !isBusy, let scanResult else { return }
+        do {
+            status = .repairing(l10n.text("正在修复分页 Provider", "Repairing paginated Provider"))
+            setProgress(
+                title: l10n.text("准备一致性试写", "Preparing consistency trial"),
+                detail: l10n.text("正在验证 rollout 首行、history_base、turn 偏移和 projection 状态。", "Checking rollout headers, history_base, turn offsets, and projection state."),
+                fraction: 0.28
+            )
+            showNotice(
+                title: l10n.text("正在修复分页 Provider", "Repairing paginated Provider"),
+                message: l10n.text("先备份并在副本验证全部偏移，完成前不要退出应用。", "Backing up and validating every offset on copies. Keep the app open."),
+                tone: .info,
+                isLoading: true,
+                autoDismiss: false
+            )
+            let captured = settings
+            let mode = selectedBackupMode
+            await Task.yield()
+            setProgress(
+                title: l10n.text("提交分页修复", "Applying paginated repair"),
+                detail: l10n.text("只改 session metadata 与必要的 SQLite 偏移字段，正文保持不变。", "Updating session metadata and required SQLite offsets; message bodies stay unchanged."),
+                fraction: 0.62
+            )
+            _ = try await Task.detached(priority: .userInitiated) {
+                try CodexRepairService().repairPaginated(repair, scan: scanResult, settings: captured, mode: mode)
+            }.value
+            setProgress(
+                title: l10n.text("复核分页读取状态", "Verifying paginated state"),
+                detail: l10n.text("正在重新扫描确认 Provider 与偏移全部收敛。", "Rescanning to confirm Provider and offsets converged."),
+                fraction: 0.86
+            )
+            self.scanResult = try await Task.detached(priority: .userInitiated) {
+                try CodexRepairService().scan(settings: captured)
+            }.value
+            status = .success(l10n.text("分页 Provider 修复完成", "Paginated Provider repair complete"))
+            lastScanAt = Date()
+            progress = nil
+            showNotice(
+                title: l10n.text("分页 Provider 修复完成", "Paginated Provider repair complete"),
+                message: l10n.text("已备份并重算关联偏移；仍需重新打开对话和重启 Codex 完成人工正文验收。", "Offsets were recalculated and backed up; reopen the chat and restart Codex for final body verification."),
+                tone: .success
+            )
+            if settings.openCodexAfterRepair { service.openCodex() }
+        } catch CodexRepairError.codexIsRunning {
+            showingCodexRunningAlert = true
+            status = .failed(CodexRepairError.codexIsRunning.localizedDescription)
+            progress = nil
+            showNotice(title: l10n.text("需要先退出 Codex", "Quit Codex First"), message: CodexRepairError.codexIsRunning.localizedDescription, tone: .warning)
+        } catch {
+            status = .failed(error.localizedDescription)
+            progress = nil
+            showNotice(title: l10n.text("分页修复失败", "Paginated Repair Failed"), message: error.localizedDescription, tone: .warning)
+        }
+    }
+
     func restore(_ backup: BackupRecord) async {
         guard !isBusy else { return }
         do {
@@ -246,6 +302,7 @@ final class AppViewModel: ObservableObject {
             + scanResult.sqliteTimestampRepairs.count
             + scanResult.sqliteTitleRepairs.count
             + scanResult.rolloutMtimeRepairs.count
+            + scanResult.paginatedProviderRepairs.count
             + (scanResult.globalStateRepair?.changes.count ?? 0)
     }
 

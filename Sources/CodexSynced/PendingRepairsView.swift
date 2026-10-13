@@ -4,6 +4,7 @@ import SwiftUI
 struct PendingRepairsView: View {
     @EnvironmentObject private var viewModel: AppViewModel
     @State private var showRepairPulse = false
+    @State private var selectedPaginatedRepair: PaginatedProviderRepair?
 
     var body: some View {
         ScrollView {
@@ -19,6 +20,37 @@ struct PendingRepairsView: View {
             }
             .padding(28)
         }
+        .sheet(item: $selectedPaginatedRepair) { repair in
+            VStack(alignment: .leading, spacing: 16) {
+                Text(viewModel.l10n.text("确认分页 Provider 修复", "Confirm paginated Provider repair"))
+                    .font(.title2)
+                Text(displayTitle(repair.title, fallback: repair.threadID))
+                    .font(.headline)
+                RepairRiskCard(
+                    tone: .warning,
+                    title: viewModel.l10n.text("这是独立的第二阶段写入", "This is a separate second-stage write"),
+                    message: viewModel.l10n.text("将改写分页 session_meta 首行，并同步 history_base、thread_turns 与 projection 偏移。不会拼接或重建正文；失败会从本次备份恢复。", "This rewrites paginated session_meta headers and synchronizes history_base, thread_turns, and projection offsets. Bodies are never concatenated or rebuilt; failures restore this backup.")
+                )
+                Text(viewModel.l10n.text("目标 Provider：\(repair.targetProvider)\nrollout 文件：\(repair.rolloutRepairs.count)\nturn 偏移：\(repair.turnOffsetRepairs.count)\nprojection 偏移：\(repair.projectionOffsetRepairs.count)", "Target Provider: \(repair.targetProvider)\nRollout files: \(repair.rolloutRepairs.count)\nTurn offsets: \(repair.turnOffsetRepairs.count)\nProjection offsets: \(repair.projectionOffsetRepairs.count)"))
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundStyle(DS.muted)
+                    .textSelection(.enabled)
+                Text(viewModel.l10n.text("修复后仍需重新打开对话并重启 Codex，核对正文顺序、遗漏、重复和项目归属。", "After repair, reopen the chat and restart Codex to check order, omissions, duplicates, and project ownership."))
+                    .foregroundStyle(DS.muted)
+                HStack {
+                    Spacer()
+                    Button(viewModel.l10n.text("取消", "Cancel")) { selectedPaginatedRepair = nil }
+                    Button(viewModel.l10n.text("备份并修复分页 Provider", "Back Up & Repair Paginated Provider")) {
+                        selectedPaginatedRepair = nil
+                        Task { await viewModel.repairPaginated(repair) }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(viewModel.isBusy)
+                }
+            }
+            .padding(24)
+            .frame(width: 620)
+        }
     }
 
     private var summary: some View {
@@ -30,6 +62,7 @@ struct PendingRepairsView: View {
                 row(viewModel.l10n.text("待写入短标题", "Sidebar title rows"), "\(viewModel.scanResult?.sqliteTitleRepairs.count ?? 0)")
                 row(viewModel.l10n.text("待修复更新时间", "Timestamp rows"), "\((viewModel.scanResult?.sqliteTimestampRepairs.count ?? 0) + (viewModel.scanResult?.rolloutMtimeRepairs.count ?? 0))")
                 row(viewModel.l10n.text("分页 Provider 需确认", "Paginated Provider review"), "\(viewModel.scanResult?.paginatedProviderWarnings.count ?? 0)")
+                row(viewModel.l10n.text("可安全重算分页偏移", "Paginated repairs ready"), "\(viewModel.scanResult?.paginatedProviderRepairs.count ?? 0)")
                 row(viewModel.l10n.text("待重建索引条目", "Index entries to rebuild"), "\(viewModel.scanResult?.indexRepairs.count ?? 0)")
                 row(viewModel.l10n.text("全局 UI 状态变更", "Global UI state changes"), "\(viewModel.scanResult?.globalStateRepair?.changes.count ?? 0)", last: true)
             }
@@ -126,9 +159,11 @@ struct PendingRepairsView: View {
                             .foregroundStyle(DS.muted)
                     }
                     warningRows(result: result)
+                    paginatedRepairRows(result: result)
                 } else {
-                    if let result = viewModel.scanResult, !result.paginatedProviderWarnings.isEmpty {
+                    if let result = viewModel.scanResult, !result.paginatedProviderWarnings.isEmpty || !result.paginatedProviderRepairs.isEmpty || !result.paginatedProviderDiagnostics.isEmpty {
                         warningRows(result: result)
+                        paginatedRepairRows(result: result)
                     } else {
                         EmptyState(
                         image: "checkmark.circle",
@@ -152,7 +187,7 @@ struct PendingRepairsView: View {
                 RepairRiskCard(
                     tone: .warning,
                     title: viewModel.l10n.text("分页会话需要单独确认", "Paginated threads need separate review"),
-                    message: viewModel.l10n.text("当前版本不会直接改写分页 rollout 首行，因为这可能改变 history_base 字节边界；SQLite Provider 对齐不会被冒充为正文修复。", "This version does not rewrite paginated rollout headers because that can change history_base byte boundaries; SQLite alignment is not presented as a body repair.")
+                    message: viewModel.l10n.text("未通过完整分支和偏移校验的项目不会自动改写；通过校验的项目可在下方进入独立第二阶段修复。SQLite Provider 对齐不会被冒充为正文修复。", "Items that fail complete lineage and offset validation are never rewritten automatically; validated items can enter the separate second-stage repair below. SQLite alignment is not presented as a body repair.")
                 )
                 ForEach(result.paginatedProviderWarnings.prefix(10)) { warning in
                     HStack(spacing: 10) {
@@ -168,6 +203,57 @@ struct PendingRepairsView: View {
                 }
             }
             .padding(.top, 8)
+        }
+        if !result.paginatedProviderDiagnostics.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                RepairRiskCard(
+                    tone: .warning,
+                    title: viewModel.l10n.text("分页诊断需要人工确认", "Paginated diagnostics need manual review"),
+                    message: viewModel.l10n.text("检测到历史库或分支索引无法唯一解释。工具不会猜测活动入口，也不会改写这些文件。", "The history database or lineage index could not be explained uniquely. The tool will not guess an active entrypoint or rewrite these files.")
+                )
+                ForEach(Array(result.paginatedProviderDiagnostics.prefix(10).enumerated()), id: \.offset) { _, diagnostic in
+                    Text(diagnostic)
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(DS.muted)
+                        .textSelection(.enabled)
+                }
+            }
+            .padding(.top, 8)
+        }
+    }
+
+    @ViewBuilder
+    private func paginatedRepairRows(result: ScanResult) -> some View {
+        if !result.paginatedProviderRepairs.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                RepairRiskCard(
+                    tone: .info,
+                    title: viewModel.l10n.text("分页 Provider 可安全重算", "Paginated Provider repairs are ready"),
+                    message: viewModel.l10n.text("已验证唯一分支链、正文边界和历史库结构。确认后会先备份，再同步修改首行 metadata 与必要偏移。", "The unique lineage, body boundaries, and history schema passed validation. Confirmation backs up first, then updates metadata and required offsets together.")
+                )
+                ForEach(result.paginatedProviderRepairs) { repair in
+                    HStack(spacing: 10) {
+                        Image(systemName: "arrow.triangle.2.circlepath")
+                            .foregroundStyle(DS.blue)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(displayTitle(repair.title, fallback: repair.threadID))
+                                .font(.system(size: 13, weight: .medium))
+                                .lineLimit(1)
+                            Text(viewModel.l10n.text("\(repair.rolloutRepairs.count) 个 rollout · \(repair.turnOffsetRepairs.count) 个 turn 偏移 · \(repair.projectionOffsetRepairs.count) 个 projection 偏移", "\(repair.rolloutRepairs.count) rollout files · \(repair.turnOffsetRepairs.count) turn offsets · \(repair.projectionOffsetRepairs.count) projection offsets"))
+                                .font(.system(size: 12, design: .monospaced))
+                                .foregroundStyle(DS.muted)
+                        }
+                        Spacer()
+                        Button(viewModel.l10n.text("预览并修复", "Review & Repair")) {
+                            selectedPaginatedRepair = repair
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(viewModel.isBusy)
+                    }
+                    .padding(.vertical, 5)
+                }
+            }
+            .padding(.top, 10)
         }
     }
 

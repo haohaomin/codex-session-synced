@@ -10,7 +10,24 @@ This release unifies provider-switch visibility repair, paginated-risk warnings,
 
 [1.6.0 release notes](docs/release/v1.6.0-en.md) · [Download macOS 1.6.0](https://github.com/haohaomin/codex-session-synced/releases/tag/v1.6.0)
 
-[1.7.0 release notes](docs/release/v1.7.0-en.md) · [Download Codex Synced 1.7.0](https://github.com/renhao12356578/codex-session-synced/releases/tag/v1.7.0)
+[1.7.0 release notes](docs/release/v1.7.0-en.md) · [Download Codex Synced 1.7.0](https://github.com/haohaomin/codex-session-synced/releases/tag/v1.7.0)
+
+## 1.8.0: Complete cross-platform design parity
+
+1.8.0 closes the remaining consistency gaps after 1.7.0: Windows persists the language choice, detects Desktop/CLI/app-server writers, requires an unambiguous auto-discovered state database for Chat Repair, scopes unknown-file blocking to the affected directory, and verifies the entrypoint on the SQLite trial copy before committing. macOS performs the same trial-entrypoint check.
+
+[1.8.0 release notes](docs/release/v1.8.0-en.md) · [Download Codex Synced 1.8.0](https://github.com/haohaomin/codex-session-synced/releases/tag/v1.8.0)
+
+## 1.7.0: Unified Windows / macOS repair design
+
+This release brings both platforms to the same repair workflow and safety model:
+
+- Windows and macOS both provide **Chat Repair** with read-only lineage diagnosis, minimal `rollout_path` repair, and conditional rollback.
+- Paginated Provider repair is a separate second-stage operation on both platforms: trial on copies first, then update the header, `history_base`, turn offsets, and projection offsets together.
+- Both platforms use the same **diagnose → preview → back up → write → verify** flow, risk levels, Codex-writer check, and post-restart manual acceptance boundary.
+- Windows persists the language choice, detects Desktop/CLI/app-server writers, and scopes unknown rollout-file blocking to the affected directory.
+
+[Unified design specification](docs/unified-design.md) · [1.7.0 publish and acceptance plan](docs/release/v1.7.0-publish-plan.md)
 
 - **Layered provider safety**: legacy-format threads remain eligible for safe alignment; paginated Provider mismatches are shown separately and are not presented as body repairs.
 - **WAL-consistent backups**: lightweight backups retain live SQLite/WAL/SHM files and create SQLite Backup API snapshots for present `state_*`, `thread_history_*`, and `logs_*` databases.
@@ -30,7 +47,7 @@ The second-stage paginated repair path is now implemented behind an explicit con
 
 The full test suite and Release build pass. After applying a repair, reopen and restart Codex and manually compare message order, omissions, duplicates, and project ownership.
 
-## 1.4.0: Chat Diagnosis & Entrypoint Repair (experimental, macOS)
+## 1.4.0: Chat Diagnosis & Entrypoint Repair (historical release)
 
 The new **Chat Repair** page addresses paginated chats whose JSONL files still exist but whose logical thread points to an older branch. It is separate from sidebar repair. Both macOS and Windows now provide read-only lineage diagnosis, minimal entrypoint repair, and guarded rollback. Windows paginated Provider offset repair also has its own explicit confirmation flow and never runs through ordinary Provider alignment.
 
@@ -75,18 +92,18 @@ Regression coverage was also added for database selection, archived threads, cor
 
 ## Windows Download and Usage
 
-1. Download `Codex-Synced-Windows-x64-1.7.0.msi` from the [latest GitHub Release](https://github.com/renhao12356578/codex-session-synced/releases/latest).
+1. Download `Codex-Synced-Windows-x64-1.8.0.msi` from the [latest GitHub Release](https://github.com/haohaomin/codex-session-synced/releases/latest).
 2. Quit Codex.
 3. Install the MSI, then open `Codex Synced` from the Start menu.
 4. Review pending changes, choose a backup mode, then apply the repair.
 5. For paginated Provider cases or hidden follow-up messages, open **Chat Repair**, run a read-only scan, and confirm paginated or entrypoint repair one chat at a time.
 6. Reopen and restart Codex, then verify message content, order, omissions, duplicates, and project ownership.
 
-The Windows build is a full desktop app installer. It defaults to `%USERPROFILE%\.codex`, automatically detects the active state database directory, and the directory can be changed in settings. The Release also includes `Codex-Synced-Windows-x64-1.7.0.zip` for users who prefer a manually extracted app directory.
+The Windows build is a full desktop app installer. It defaults to `%USERPROFILE%\.codex`, automatically detects the active state database directory, and the directory can be changed in settings. The Release also includes `Codex-Synced-Windows-x64-1.8.0.zip` for users who prefer a manually extracted app directory.
 
 ## macOS Download and Install
 
-1. Download `Codex-Synced-macOS-1.7.0.dmg` from the [latest GitHub Release](https://github.com/renhao12356578/codex-session-synced/releases/latest).
+1. Download `Codex-Synced-macOS-1.8.0.dmg` from the [latest GitHub Release](https://github.com/haohaomin/codex-session-synced/releases/latest).
 2. Open the DMG.
 3. Drag `Codex Synced.app` into `Applications`.
 4. On first launch, if macOS blocks the app, right-click it in Finder, choose `Open`, and confirm.

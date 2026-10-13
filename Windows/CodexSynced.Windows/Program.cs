@@ -64,6 +64,7 @@ internal sealed class AppSettings
 {
     public string CodexHome { get; set; } = "";
     public string? SqliteHome { get; set; }
+    public string Language { get; set; } = "zh";
     public BackupMode DefaultBackupMode { get; set; } = BackupMode.Lightweight;
     public int LightweightLimit { get; set; } = 5;
     public int FullLimit { get; set; } = 3;
@@ -511,11 +512,17 @@ internal sealed class RepairService
 
     public static bool IsCodexRunning()
     {
+        var writerNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "codex",
+            "codex-cli",
+            "codex-app-server"
+        };
         foreach (var process in Process.GetProcesses())
         {
             try
             {
-                if (process.ProcessName.Equals("Codex", StringComparison.OrdinalIgnoreCase))
+                if (writerNames.Contains(process.ProcessName))
                     return true;
             }
             catch

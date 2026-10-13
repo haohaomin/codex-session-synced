@@ -75,6 +75,7 @@ internal sealed class MainWindow : Window
         UseLayoutRounding = true;
         SnapsToDevicePixels = true;
         _section = UiSection.Home;
+        _language = string.Equals(_settings.Language, "en", StringComparison.OrdinalIgnoreCase) ? UiLanguage.En : UiLanguage.Zh;
         _backupMode = _settings.DefaultBackupMode;
         _host.Background = PageBg;
 
@@ -201,6 +202,8 @@ internal sealed class MainWindow : Window
     {
         if (_language == language) return;
         _language = language;
+        _settings.Language = language == UiLanguage.En ? "en" : "zh";
+        _settings.Save();
         BuildNavButtons();
         UpdateLanguageSegments();
         Show(CurrentView(), true);

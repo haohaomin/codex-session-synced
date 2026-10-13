@@ -8,6 +8,23 @@ Codex Synced 是一个 Windows / macOS 本地修复工具，用来解决 Codex D
 
 它不是云同步工具，也不会上传你的会话。所有扫描、备份、修复都发生在本机。
 
+## 1.8.0：完成双平台统一设计
+
+1.8.0 补齐 1.7.0 发布后的跨平台一致性：Windows 持久化语言选择，检测 Desktop/CLI/app-server 写入进程；对话入口扫描要求唯一状态库、按目录阻断未知文件，并在 SQLite 副本验证入口写入后才提交；macOS 也增加同样的副本入口校验。
+
+[1.8.0 发布说明](docs/release/v1.8.0.md) · [下载 Codex Synced 1.8.0](https://github.com/haohaomin/codex-session-synced/releases/tag/v1.8.0)
+
+## 1.7.0：Windows / macOS 功能统一
+
+本版本完成双平台统一修复入口和风险设计：
+
+- Windows 与 macOS 都支持「对话修复」：只读 lineage 诊断、最小 `rollout_path` 修复和条件撤销。
+- 分页 Provider 修复在两端都独立于普通 Provider 对齐，先副本试写，再同步首行、`history_base`、turn 和 projection 偏移。
+- 两端统一“诊断 → 预览 → 备份 → 写入 → 复核”流程、风险分层、退出 Codex 检查和重启后人工验收边界。
+- Windows 现在持久化语言选择，并检测 Desktop、CLI 和 app-server 写入进程；未知 rollout 文件只阻断同目录对话。
+
+[统一设计规范](docs/unified-design.md) · [1.7.0 发布与验收方案](docs/release/v1.7.0-publish-plan.md)
+
 ## 1.5.0：Provider 切换诊断与安全备份
 
 本版本把 Provider 切换后的可见性修复、分页风险提示和备份边界统一到同一套“诊断 → 预览 → 备份 → 验收”流程。分页 rollout 仍不会被静默改写；需要重算 `history_base` 的情况会明确停在人工确认。
@@ -16,7 +33,7 @@ Codex Synced 是一个 Windows / macOS 本地修复工具，用来解决 Codex D
 
 [1.6.0 发布说明](docs/release/v1.6.0.md) · [下载 macOS 1.6.0](https://github.com/haohaomin/codex-session-synced/releases/tag/v1.6.0)
 
-[1.7.0 发布说明](docs/release/v1.7.0.md) · [下载 Codex Synced 1.7.0](https://github.com/renhao12356578/codex-session-synced/releases/tag/v1.7.0)
+[1.7.0 发布说明](docs/release/v1.7.0.md) · [下载 Codex Synced 1.7.0](https://github.com/haohaomin/codex-session-synced/releases/tag/v1.7.0)
 
 - **Provider 风险分层**：普通格式会话继续支持安全对齐；分页 Provider 差异独立展示，不把 SQLite 元数据修复冒充为正文修复。
 - **WAL 一致备份**：轻量备份保留活动数据库的主文件、WAL/SHM，并额外写入 `SQLite Backup API` 一致快照；同时覆盖存在的 `state_*`、`thread_history_*` 和 `logs_*` 数据库。
@@ -36,7 +53,7 @@ Codex Synced 是一个 Windows / macOS 本地修复工具，用来解决 Codex D
 
 当前版本仍要求修复后重新打开并重启 Codex，逐条核对正文、遗漏、重复和项目归属；自动化测试已覆盖 50 字节中间偏移、多数据库阻断和备份恢复。
 
-## 1.4.0：对话诊断与入口修复（macOS 实验性功能）
+## 1.4.0：对话诊断与入口修复（历史版本）
 
 新增独立的「对话修复」页面，用于**原始 JSONL 仍在，但主对话入口停留在旧分支，导致后续消息不显示**的情况。本功能不混入原有侧边栏一键修复；macOS 与 Windows 均提供只读 lineage 诊断、最小入口修复和安全撤销。Windows 的分页 Provider 偏移修复也使用独立确认入口，不混入普通 Provider 修复。
 
@@ -86,18 +103,18 @@ Codex Synced 是一个 Windows / macOS 本地修复工具，用来解决 Codex D
 
 ## Windows 下载与使用
 
-1. 前往 [GitHub Releases](https://github.com/renhao12356578/codex-session-synced/releases/latest) 下载 `Codex-Synced-Windows-x64-1.7.0.msi`。
+1. 前往 [GitHub Releases](https://github.com/haohaomin/codex-session-synced/releases/latest) 下载 `Codex-Synced-Windows-x64-1.8.0.msi`。
 2. 退出 Codex。
 3. 双击 MSI 完成安装，然后从开始菜单打开 `Codex Synced`。
 4. 查看待修复项，选择备份模式，点击“备份并修复”。
 5. 分页 Provider 或后续消息不可见时，进入“对话修复”，先只读扫描，再逐条确认分页修复或入口修复。
 6. 重新打开并重启 Codex，检查历史会话正文、顺序、遗漏、重复和项目归属。
 
-Windows 版是完整桌面应用安装包，默认读取 `%USERPROFILE%\.codex`，并会自动识别当前活跃的状态库目录；也可以在设置中修改目录。Release 中也提供 `Codex-Synced-Windows-x64-1.7.0.zip`，用于不想安装时手动运行应用目录。
+Windows 版是完整桌面应用安装包，默认读取 `%USERPROFILE%\.codex`，并会自动识别当前活跃的状态库目录；也可以在设置中修改目录。Release 中也提供 `Codex-Synced-Windows-x64-1.8.0.zip`，用于不想安装时手动运行应用目录。
 
 ## macOS 下载与安装
 
-1. 前往 [GitHub Releases](https://github.com/renhao12356578/codex-session-synced/releases/latest) 下载 `Codex-Synced-macOS-1.7.0.dmg`。
+1. 前往 [GitHub Releases](https://github.com/haohaomin/codex-session-synced/releases/latest) 下载 `Codex-Synced-macOS-1.8.0.dmg`。
 2. 双击打开 DMG。
 3. 将 `Codex Synced.app` 拖入 `Applications`。
 4. 第一次打开时，如果 macOS 提示来自未验证开发者，请在 Finder 中右键点击应用，选择“打开”，再确认打开。
@@ -113,7 +130,7 @@ Windows 版是完整桌面应用安装包，默认读取 `%USERPROFILE%\.codex`�
 2. 可选：校验下载文件的 SHA256，应与 Release 页面一致：
 
 ```bash
-   shasum -a 256 ~/Downloads/Codex-Synced-macOS-1.6.0.dmg
+   shasum -a 256 ~/Downloads/Codex-Synced-macOS-1.8.0.dmg
 ```
 
 3. 先尝试 Apple 推荐的方式：在 Finder 中进入 `Applications`，右键点击 `Codex Synced.app`，选择“打开”，再确认打开。

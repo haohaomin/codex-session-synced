@@ -11,13 +11,13 @@
     <RootNamespace>CodexSynced.Windows</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>Resources\AppIcon.ico</ApplicationIcon>
-    <Version>1.7.0</Version>
+    <Version>1.8.0</Version>
     <Authors>saymyzj</Authors>
     <Description>Repair local Codex Desktop sidebar history summaries.</Description>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
     <SatelliteResourceLanguages>en-US</SatelliteResourceLanguages>
   </PropertyGroup>
-  <Target Name="GenerateWindowsIcon" BeforeTargets="CoreCompile">
+  <Target Name="GenerateWindowsIcon" BeforeTargets="CoreCompile" Condition="'$(GenerateWindowsIcon)' != 'false'">
     <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildThisFileDirectory)..\scripts\generate-icon.ps1&quot;" />
   </Target>
 </Project>

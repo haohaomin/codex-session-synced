@@ -219,6 +219,7 @@ public final class HistoryRepairService {
         try SQLiteDatabase(path: snapshot.path, readonly: true).backup(to: trialURL)
         let trial = try SQLiteDatabase(path: trialURL.path, readonly: false)
         let after = try trial.changeEntrypoint(expected: diagnosis.row, to: target) {}
+        guard after.path == target else { throw HistoryRepairError.unsafe("副本试写后的对话入口不符合预期。Trial entrypoint did not match the requested path.") }
         let record = HistoryRepairRecord(directory: directory.path, threadID: diagnosis.id, title: diagnosis.title,
             createdAt: Date(timeIntervalSince1970: floor(Date().timeIntervalSince1970)), oldPath: diagnosis.currentPath, newPath: target)
         let manifest = HistoryManifest(record: record, database: fresh.database.path, codexHome: fresh.codexHome.path,

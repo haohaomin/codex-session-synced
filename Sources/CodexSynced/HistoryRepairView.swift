@@ -12,7 +12,7 @@ struct HistoryRepairView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 HeaderView(title: t("对话诊断与修复", "Chat Diagnosis & Repair"),
-                    subtitle: t("实验性 · 针对原文件仍在、后续消息不显示的分页对话。", "Experimental · For paginated chats whose later messages are hidden but files still exist."))
+                    subtitle: t("独立确认 · 针对原文件仍在、后续消息不显示的分页对话。", "Separate confirmation · For paginated chats whose later messages are hidden but files still exist."))
                 SoftPanel {
                     VStack(alignment: .leading, spacing: 12) {
                         Text(t("只改读取入口，不拼接正文", "Repair the entrypoint, never concatenate messages"))

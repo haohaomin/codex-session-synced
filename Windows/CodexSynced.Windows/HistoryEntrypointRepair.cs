@@ -54,16 +54,25 @@ internal sealed class HistoryEntrypointService
             if (parsed.Root.TryGetValue("sqlite_home", out var configured))
                 configuredSQLite = ExpandPath(configured);
         }
+        var explicitSQLite = !string.IsNullOrWhiteSpace(configuredSQLite);
         var sqliteHome = ResolveSQLiteHome(codexHome, configuredSQLite);
-        var databases = Directory.Exists(sqliteHome)
-            ? Directory.EnumerateFiles(sqliteHome, "state_*.sqlite", SearchOption.TopDirectoryOnly).ToList()
-            : [];
+        var databases = explicitSQLite
+            ? (Directory.Exists(sqliteHome)
+                ? Directory.EnumerateFiles(sqliteHome, "state_*.sqlite", SearchOption.TopDirectoryOnly).ToList()
+                : [])
+            : new[] { codexHome, Path.Combine(codexHome, "sqlite") }
+                .Where(Directory.Exists)
+                .SelectMany(path => Directory.EnumerateFiles(path, "state_*.sqlite", SearchOption.TopDirectoryOnly))
+                .GroupBy(Path.GetFullPath, StringComparer.OrdinalIgnoreCase)
+                .Select(group => group.First())
+                .ToList();
         if (databases.Count != 1)
             throw new InvalidOperationException("对话修复要求明确选择仅包含一个 state_*.sqlite 的 SQLite 目录。");
         using var db = new SqliteDatabase(databases[0], true);
         var rows = db.QueryHistoryEntrypointRows().Where(row => row.HistoryMode.Equals("paginated", StringComparison.OrdinalIgnoreCase)).Select(row => new Row(row.Id, row.RolloutPath, row.Title, row.HistoryMode)).ToList();
         var warnings = new List<string>();
-        var nodes = LoadNodes(codexHome, warnings);
+        var blockedDirectories = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var nodes = LoadNodes(codexHome, warnings, blockedDirectories);
         var global = nodes.GroupBy(node => node.PhysicalId, StringComparer.OrdinalIgnoreCase).ToDictionary(group => group.Key, group => group.ToList(), StringComparer.OrdinalIgnoreCase);
         var duplicate = global.FirstOrDefault(item => item.Value.Count > 1);
         if (duplicate.Value is { Count: > 1 })
@@ -78,8 +87,13 @@ internal sealed class HistoryEntrypointService
                 var validation = Validate(chain);
                 var leaf = chain[^1];
                 var unchanged = SamePath(leaf.Path, row.Path);
-                diagnoses.Add(new(row.Id, row.Title, row.Path, unchanged ? null : leaf.Path,
-                    unchanged ? "入口已指向唯一末端；客户端读取仍需人工验收。Entrypoint is current; client reading still requires manual verification." : "发现唯一后继链，序号与字节边界一致。Unique successor chain; ordinal and byte boundaries agree.", validation.Messages, validation.Files));
+                var blocked = blockedDirectories.Contains(Path.GetDirectoryName(Path.GetFullPath(row.Path)) ?? "");
+                diagnoses.Add(new(row.Id, row.Title, row.Path, unchanged || blocked ? null : leaf.Path,
+                    unchanged
+                        ? "入口已指向唯一末端；客户端读取仍需人工验收。Entrypoint is current; client reading still requires manual verification."
+                        : blocked
+                            ? "同目录存在无法识别的文件，禁止自动修复。Unknown files in this directory block automatic repair."
+                            : "发现唯一后继链，序号与字节边界一致。Unique successor chain; ordinal and byte boundaries agree.", validation.Messages, validation.Files));
             }
             catch (Exception error)
             {
@@ -126,7 +140,12 @@ internal sealed class HistoryEntrypointService
         var trial = Path.Combine(directory, "state-trial.sqlite");
         File.Copy(snapshot, trial, true);
         using (var trialDb = new SqliteDatabase(trial, false))
+        {
             trialDb.ChangeEntrypoint(diagnosis.Id, diagnosis.CurrentPath, diagnosis.ProposedPath);
+            var trialRow = trialDb.QueryHistoryEntrypointRows().FirstOrDefault(row => row.Id.Equals(diagnosis.Id, StringComparison.OrdinalIgnoreCase));
+            if (trialRow is null || !SamePath(trialRow.RolloutPath, diagnosis.ProposedPath))
+                throw new InvalidOperationException("副本试写后的对话入口不符合预期，拒绝提交。Trial entrypoint did not match the requested path.");
+        }
         var recheck = Scan(settings);
         var recheckDiagnosis = recheck.Diagnoses.FirstOrDefault(item => item.Id.Equals(diagnosis.Id, StringComparison.OrdinalIgnoreCase));
         if (recheckDiagnosis is null || !SameDiagnosis(recheckDiagnosis, diagnosis))
@@ -184,7 +203,7 @@ internal sealed class HistoryEntrypointService
         string.Equals(left.ProposedPath, right.ProposedPath, StringComparison.OrdinalIgnoreCase) &&
         left.Files.SequenceEqual(right.Files);
 
-    private static List<Node> LoadNodes(string codexHome, List<string> warnings)
+    private static List<Node> LoadNodes(string codexHome, List<string> warnings, HashSet<string> blockedDirectories)
     {
         var result = new List<Node>();
         foreach (var rootName in new[] { "sessions", "archived_sessions" })
@@ -197,6 +216,7 @@ internal sealed class HistoryEntrypointService
                 if (!TryIds(path, out var logical, out var physical))
                 {
                     warnings.Add($"无法识别文件名 / Unknown filename: {Path.GetFileName(path)}");
+                    blockedDirectories.Add(Path.GetDirectoryName(Path.GetFullPath(path)) ?? "");
                     continue;
                 }
                 try

@@ -2297,14 +2297,15 @@ internal static class SelfTest
             File.WriteAllText(Path.Combine(paginatedRoot, "config.toml"), "model_provider = \"custom\"" + Environment.NewLine);
             var paginatedDirectory = Path.Combine(paginatedRoot, "sessions", "2026", "06", "03");
             Directory.CreateDirectory(paginatedDirectory);
-            var paginatedRollout = Path.Combine(paginatedDirectory, "rollout-paginated.jsonl");
-            File.WriteAllText(paginatedRollout, "{\"timestamp\":\"2026-06-03T12:00:00.000Z\",\"ordinal\":0,\"type\":\"session_meta\",\"payload\":{\"id\":\"paginated\",\"history_mode\":\"paginated\",\"model_provider\":\"openai\"}}" + Environment.NewLine + "{\"ordinal\":1,\"type\":\"event_msg\",\"payload\":{\"message\":\"keep paginated body\"}}" + Environment.NewLine);
+            const string paginatedID = "11111111-1111-1111-1111-111111111111";
+            var paginatedRollout = Path.Combine(paginatedDirectory, $"rollout-2026-06-03T12-00-00-{paginatedID}_{paginatedID}.jsonl");
+            File.WriteAllText(paginatedRollout, $"{{\"timestamp\":\"2026-06-03T12:00:00.000Z\",\"ordinal\":0,\"type\":\"session_meta\",\"payload\":{{\"id\":\"{paginatedID}\",\"history_mode\":\"paginated\",\"model_provider\":\"openai\"}}}}" + Environment.NewLine + "{\"ordinal\":1,\"type\":\"event_msg\",\"payload\":{\"message\":\"keep paginated body\"}}" + Environment.NewLine);
             var paginatedState = Path.Combine(paginatedRoot, "state_5.sqlite");
-            CreateSingleThreadState(paginatedState, "paginated", paginatedRollout);
+            CreateSingleThreadState(paginatedState, paginatedID, paginatedRollout);
             using (var db = new SqliteDatabase(paginatedState, false))
                 db.Execute("UPDATE threads SET model_provider = 'openai'");
             var paginatedHistory = Path.Combine(paginatedRoot, "thread_history_1.sqlite");
-            CreatePaginatedHistoryState(paginatedHistory, "paginated", paginatedRollout);
+            CreatePaginatedHistoryState(paginatedHistory, paginatedID, paginatedRollout);
             var beforePaginated = File.ReadAllBytes(paginatedRollout);
             var beforePaginatedBody = Encoding.UTF8.GetBytes("{\"ordinal\":1,\"type\":\"event_msg\",\"payload\":{\"message\":\"keep paginated body\"}}" + Environment.NewLine);
             var paginatedScan = service.Scan(new AppSettings { CodexHome = paginatedRoot, OpenCodexAfterRepair = false, AlignProvidersForVisibility = true });

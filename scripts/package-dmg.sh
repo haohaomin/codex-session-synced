@@ -22,18 +22,17 @@ DMG_STAGING_DIR="$DIST_DIR/dmg-staging"
 RW_DMG="$DIST_DIR/$APP_NAME-rw.dmg"
 ICON_SOURCE="$ROOT_DIR/Resources/AppIconSource.png"
 ICON_FILE="$ROOT_DIR/Resources/AppIcon.icns"
-SWIFT_SDK_ARGS=()
-if [[ -n "${CODEX_SDK_PATH:-}" ]]; then
-  SWIFT_SDK_ARGS+=(--sdk "$CODEX_SDK_PATH")
-fi
-
 mkdir -p "$DIST_DIR"
 rm -rf "$APP_DIR" "$DMG_STAGING_DIR" "$DMG_PATH" "$VERSIONED_DMG_PATH" "$RW_DMG"
 if [[ -d "/Volumes/$APP_NAME" ]]; then
   hdiutil detach "/Volumes/$APP_NAME" || true
 fi
 
-swift build -c release --disable-sandbox "${SWIFT_SDK_ARGS[@]}"
+if [[ -n "${CODEX_SDK_PATH:-}" ]]; then
+  swift build -c release --disable-sandbox --sdk "$CODEX_SDK_PATH"
+else
+  swift build -c release --disable-sandbox
+fi
 
 if [[ -f "$ICON_SOURCE" ]]; then
   "$ROOT_DIR/scripts/generate-app-icon.sh"

@@ -190,6 +190,8 @@ internal sealed class ScanResult
     public required List<ThreadRow> SqliteCompatibilityUpdates { get; init; }
     public required List<RolloutRepair> RolloutRepairs { get; init; }
     public required List<PaginatedProviderWarning> PaginatedProviderWarnings { get; init; }
+    public required List<PaginatedProviderRepair> PaginatedProviderRepairs { get; init; }
+    public required List<string> PaginatedProviderDiagnostics { get; init; }
     public required List<IndexRepair> IndexRepairs { get; init; }
     public required List<TimestampRepair> SqliteTimestampRepairs { get; init; }
     public required List<TitleRepair> SqliteTitleRepairs { get; init; }
@@ -200,7 +202,8 @@ internal sealed class ScanResult
     public required string SqliteHome { get; init; }
     public bool AlignProvidersForVisibility { get; init; }
 
-    public bool HasWarnings => PaginatedProviderWarnings.Count > 0;
+    public bool HasPaginatedReview => PaginatedProviderWarnings.Count > 0 || PaginatedProviderRepairs.Count > 0 || PaginatedProviderDiagnostics.Count > 0;
+    public bool HasWarnings => HasPaginatedReview;
 
     public bool HasRepairs =>
         SqliteProviderUpdates.Count > 0 ||
@@ -235,6 +238,8 @@ internal sealed class ScanResult
         sqliteCompatibilityUpdates = SqliteCompatibilityUpdates.Count,
         rolloutRepairs = RolloutRepairs.Count,
         paginatedProviderWarnings = PaginatedProviderWarnings.Count,
+        paginatedProviderRepairs = PaginatedProviderRepairs.Count,
+        paginatedProviderDiagnostics = PaginatedProviderDiagnostics.Count,
         indexRepairs = IndexRepairs.Count,
         sqliteTimestampRepairs = SqliteTimestampRepairs.Count,
         sqliteTitleRepairs = SqliteTitleRepairs.Count,
@@ -338,15 +343,16 @@ internal sealed class RepairService
             threads = db.QueryThreads();
         }
         var rolloutInfo = RolloutInfoByPath(threads);
-        var paginatedProviderWarnings = settings.AlignProvidersForVisibility
-            ? PaginatedProviderWarnings(threads, rolloutInfo, provider)
-            : [];
+        var paginatedScan = settings.AlignProvidersForVisibility
+            ? PaginatedProviderPlanner.Scan(codexHome, sqliteHome, threads, provider, state?.Path)
+            : new PaginatedProviderScan([], [], []);
+        var paginatedRepairIDs = paginatedScan.Repairs.Select(repair => repair.ThreadId).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var paginatedPaths = rolloutInfo
             .Where(item => item.Value.IsPaginated)
             .Select(item => item.Key)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
         var sqliteProviderUpdates = settings.AlignProvidersForVisibility
-            ? ProviderAlignmentRepairs(threads, provider, paginatedPaths)
+            ? ProviderAlignmentRepairs(threads, provider, paginatedPaths, paginatedRepairIDs)
             : ProviderRepairs(threads, rolloutInfo);
         var rolloutRepairs = settings.AlignProvidersForVisibility
             ? RolloutProviderAlignmentRepairs(threads, provider, rolloutInfo)
@@ -363,7 +369,9 @@ internal sealed class RepairService
             SqliteProviderUpdates = sqliteProviderUpdates,
             SqliteCompatibilityUpdates = [],
             RolloutRepairs = rolloutRepairs,
-            PaginatedProviderWarnings = paginatedProviderWarnings,
+            PaginatedProviderWarnings = paginatedScan.Warnings,
+            PaginatedProviderRepairs = paginatedScan.Repairs,
+            PaginatedProviderDiagnostics = paginatedScan.Diagnostics,
             IndexRepairs = IndexRepairs(codexHome, projectedThreads),
             SqliteTimestampRepairs = timestampRepairs,
             SqliteTitleRepairs = titleRepairs,
@@ -402,6 +410,78 @@ internal sealed class RepairService
             RebuildSessionIndex(scan.IndexRepairs, scan.CodexHome);
         RotateBackups(scan.CodexHome, mode, mode == BackupMode.Full ? settings.FullLimit : settings.LightweightLimit);
         return backup;
+    }
+
+    public void RepairPaginated(ScanResult scan, PaginatedProviderRepair repair, AppSettings settings, BackupMode mode, bool ignoreCodexRunning = false)
+    {
+        if (!ignoreCodexRunning && IsCodexRunning())
+            throw new InvalidOperationException("检测到 Codex 正在运行。请先退出 Codex，再执行分页修复。");
+        if (!scan.PaginatedProviderRepairs.Any(item => item.Equals(repair)))
+            throw new InvalidOperationException("分页修复预览已过期，请重新扫描。");
+        var fresh = Scan(settings);
+        var current = fresh.PaginatedProviderRepairs.FirstOrDefault(item => item.ThreadId.Equals(repair.ThreadId, StringComparison.OrdinalIgnoreCase));
+        if (current is null || !current.Equals(repair))
+            throw new InvalidOperationException("分页修复预览已过期，请重新扫描。");
+        if (repair.RolloutRepairs.Count == 0 && repair.TurnOffsetRepairs.Count == 0 && repair.ProjectionOffsetRepairs.Count == 0)
+            throw new InvalidOperationException("没有可写入的分页修复项。");
+
+        var backup = PaginatedRepairBackup.Create(scan.CodexHome, repair.StateDatabase, repair.HistoryDatabase, repair.RolloutRepairs);
+        try
+        {
+            TrialPaginatedRepair(backup, repair);
+            ApplyPaginatedRepair(repair);
+            var verified = Scan(settings);
+            if (verified.PaginatedProviderRepairs.Any(item => item.ThreadId.Equals(repair.ThreadId, StringComparison.OrdinalIgnoreCase)))
+                throw new InvalidOperationException("分页修复后仍有未收敛的偏移或 Provider 项。");
+        }
+        catch
+        {
+            try { backup.Restore(); } catch { }
+            throw;
+        }
+    }
+
+    private static void TrialPaginatedRepair(PaginatedRepairBackup backup, PaginatedProviderRepair repair)
+    {
+        var trialRoot = backup.CreateTrialRoot();
+        var trialState = Path.Combine(trialRoot, "state.sqlite");
+        var trialHistory = Path.Combine(trialRoot, "history.sqlite");
+        File.Copy(backup.StateSnapshot, trialState, true);
+        File.Copy(backup.HistorySnapshot, trialHistory, true);
+        var thread = new ThreadRow(repair.ThreadId, "", repair.Title, repair.CurrentSQLiteProvider, true, "", "vscode", "user", false, 0, 0, "", "");
+        using (var state = new SqliteDatabase(trialState, false))
+            state.UpdateProvidersCompareAndSwap([new ProviderRepair(thread, repair.TargetProvider)]);
+        using (var history = new SqliteDatabase(trialHistory, false))
+        {
+            history.UpdatePaginatedTurnOffsets(repair.TurnOffsetRepairs);
+            foreach (var projection in repair.ProjectionOffsetRepairs)
+                history.UpdatePaginatedProjectionOffset(projection);
+            history.CheckIntegrity();
+        }
+        foreach (var rollout in repair.RolloutRepairs)
+        {
+            var trialPath = Path.Combine(trialRoot, Path.GetFileName(rollout.Path));
+            File.Copy(rollout.Path, trialPath, true);
+            PaginatedProviderPlanner.ApplyRolloutRepair(rollout, trialPath);
+        }
+        using var verifiedState = new SqliteDatabase(trialState, true);
+        verifiedState.CheckIntegrity();
+    }
+
+    private static void ApplyPaginatedRepair(PaginatedProviderRepair repair)
+    {
+        var thread = new ThreadRow(repair.ThreadId, "", repair.Title, repair.CurrentSQLiteProvider, true, "", "vscode", "user", false, 0, 0, "", "");
+        using (var state = new SqliteDatabase(repair.StateDatabase, false))
+            state.UpdateProvidersCompareAndSwap([new ProviderRepair(thread, repair.TargetProvider)]);
+        using (var history = new SqliteDatabase(repair.HistoryDatabase, false))
+        {
+            history.UpdatePaginatedTurnOffsets(repair.TurnOffsetRepairs);
+            foreach (var projection in repair.ProjectionOffsetRepairs)
+                history.UpdatePaginatedProjectionOffset(projection);
+            history.CheckIntegrity();
+        }
+        foreach (var rollout in repair.RolloutRepairs)
+            PaginatedProviderPlanner.ApplyRolloutRepair(rollout);
     }
 
     public void Restore(BackupRecord backup, bool ignoreCodexRunning = false)
@@ -611,11 +691,11 @@ internal sealed class RepairService
             .Select(row => new ProviderRepair(row, rollouts[row.RolloutPath].Provider!))
             .ToList();
 
-    private static List<ProviderRepair> ProviderAlignmentRepairs(List<ThreadRow> threads, string targetProvider, HashSet<string> paginatedPaths) =>
+    private static List<ProviderRepair> ProviderAlignmentRepairs(List<ThreadRow> threads, string targetProvider, HashSet<string> paginatedPaths, HashSet<string> paginatedRepairIDs) =>
         string.IsNullOrWhiteSpace(targetProvider)
             ? []
             : ProviderAlignmentThreads(threads)
-                .Where(row => !paginatedPaths.Contains(row.RolloutPath) && row.ModelProvider != targetProvider)
+                .Where(row => !paginatedPaths.Contains(row.RolloutPath) && !paginatedRepairIDs.Contains(row.Id) && row.ModelProvider != targetProvider)
                 .Select(row => new ProviderRepair(row, targetProvider))
                 .ToList();
 
@@ -1195,6 +1275,41 @@ internal sealed class SqliteDatabase : IDisposable
         return rows;
     }
 
+    public List<HistoryEntrypointRow> QueryHistoryEntrypointRows()
+    {
+        var columns = TableColumns("threads");
+        if (!columns.Contains("id") || !columns.Contains("rollout_path"))
+            throw new InvalidOperationException("threads 表缺少对话入口字段。");
+        var title = columns.Contains("name") && columns.Contains("title") ? "COALESCE(NULLIF(name, ''), title)" : columns.Contains("name") ? "name" : columns.Contains("title") ? "title" : "id";
+        var mode = columns.Contains("history_mode") ? "COALESCE(history_mode, '')" : "''";
+        using var statement = Prepare($"SELECT id, rollout_path, {title}, {mode} FROM threads ORDER BY id");
+        var rows = new List<HistoryEntrypointRow>();
+        while (NativeSqlite.sqlite3_step(statement.Handle) == NativeSqlite.SQLITE_ROW)
+            rows.Add(new(statement.Text(0), statement.Text(1), statement.Text(2), statement.Text(3)));
+        return rows;
+    }
+
+    public void ChangeEntrypoint(string threadId, string expectedPath, string targetPath)
+    {
+        Execute("BEGIN IMMEDIATE");
+        try
+        {
+            using var statement = Prepare("UPDATE threads SET rollout_path = ? WHERE id = ? AND rollout_path = ?");
+            statement.BindText(1, targetPath);
+            statement.BindText(2, threadId);
+            statement.BindText(3, expectedPath);
+            if (NativeSqlite.sqlite3_step(statement.Handle) != NativeSqlite.SQLITE_DONE || NativeSqlite.sqlite3_changes(_handle) != 1)
+                throw new InvalidOperationException("对话入口已变化，拒绝覆盖。");
+            CheckIntegrity();
+            Execute("COMMIT");
+        }
+        catch
+        {
+            try { Execute("ROLLBACK"); } catch { }
+            throw;
+        }
+    }
+
     public void UpdateProviders(IEnumerable<ProviderRepair> repairs)
     {
         var values = repairs.ToList();
@@ -1211,6 +1326,33 @@ internal sealed class SqliteDatabase : IDisposable
                 statement.BindText(2, repair.Thread.Id);
                 if (NativeSqlite.sqlite3_step(statement.Handle) != NativeSqlite.SQLITE_DONE)
                     throw new InvalidOperationException($"SQLite 更新失败：{ErrorMessage}");
+            }
+            Execute("COMMIT");
+        }
+        catch
+        {
+            try { Execute("ROLLBACK"); } catch { }
+            throw;
+        }
+    }
+
+    public void UpdateProvidersCompareAndSwap(IEnumerable<ProviderRepair> repairs)
+    {
+        var values = repairs.ToList();
+        if (values.Count == 0)
+            return;
+        Execute("BEGIN IMMEDIATE");
+        try
+        {
+            using var statement = Prepare("UPDATE threads SET model_provider = ? WHERE id = ? AND model_provider = ?");
+            foreach (var repair in values)
+            {
+                statement.Reset();
+                statement.BindText(1, repair.TargetProvider);
+                statement.BindText(2, repair.Thread.Id);
+                statement.BindText(3, repair.Thread.ModelProvider);
+                if (NativeSqlite.sqlite3_step(statement.Handle) != NativeSqlite.SQLITE_DONE || NativeSqlite.sqlite3_changes(_handle) != 1)
+                    throw new InvalidOperationException("SQLite Provider 数据已变化，拒绝覆盖。");
             }
             Execute("COMMIT");
         }
@@ -1314,6 +1456,115 @@ internal sealed class SqliteDatabase : IDisposable
             WHERE id = ?
             """, threadIds, statement => statement.BindText(1, statement.CurrentId!));
 
+    public List<PaginatedTurnRow> PaginatedTurnRows(string threadId)
+    {
+        var columns = TableColumns("thread_turns");
+        if (!columns.IsSupersetOf(["thread_id", "turn_id", "rollout_ordinal", "rollout_byte_offset", "rollout_end_ordinal", "rollout_end_byte_offset"]))
+            throw new InvalidOperationException("thread_turns 缺少分页偏移字段，需人工确认。");
+        using var statement = Prepare("SELECT thread_id, turn_id, rollout_ordinal, rollout_byte_offset, rollout_end_ordinal, rollout_end_byte_offset FROM thread_turns WHERE thread_id = ? ORDER BY rollout_ordinal, turn_id");
+        statement.BindText(1, threadId);
+        var rows = new List<PaginatedTurnRow>();
+        while (NativeSqlite.sqlite3_step(statement.Handle) == NativeSqlite.SQLITE_ROW)
+            rows.Add(new(statement.Text(0), statement.Text(1), NativeSqlite.sqlite3_column_int64(statement.Handle, 2), NativeSqlite.sqlite3_column_int64(statement.Handle, 3), statement.NullableInt64(4), statement.NullableInt64(5)));
+        return rows;
+    }
+
+    public PaginatedProjectionRow? PaginatedProjectionRow(string threadId)
+    {
+        var columns = TableColumns("thread_history_projection_state");
+        if (!columns.IsSupersetOf(["thread_id", "next_rollout_byte_offset", "next_rollout_ordinal"]))
+            throw new InvalidOperationException("projection state 缺少分页偏移字段，需人工确认。");
+        using var statement = Prepare("SELECT next_rollout_byte_offset, next_rollout_ordinal FROM thread_history_projection_state WHERE thread_id = ?");
+        statement.BindText(1, threadId);
+        if (NativeSqlite.sqlite3_step(statement.Handle) != NativeSqlite.SQLITE_ROW)
+            return null;
+        return new PaginatedProjectionRow(NativeSqlite.sqlite3_column_int64(statement.Handle, 0), NativeSqlite.sqlite3_column_int64(statement.Handle, 1));
+    }
+
+    public void UpdatePaginatedTurnOffsets(IEnumerable<PaginatedTurnOffsetRepair> repairs)
+    {
+        var values = repairs.ToList();
+        if (values.Count == 0)
+            return;
+        Execute("BEGIN IMMEDIATE");
+        try
+        {
+            using var statement = Prepare("UPDATE thread_turns SET rollout_byte_offset = ?, rollout_end_byte_offset = ? WHERE thread_id = ? AND turn_id = ? AND rollout_byte_offset = ? AND ((rollout_end_byte_offset IS NULL AND ? IS NULL) OR rollout_end_byte_offset = ?)");
+            foreach (var repair in values)
+            {
+                statement.Reset();
+                statement.BindInt64(1, repair.TargetStartOffset);
+                statement.BindOptionalInt64(2, repair.TargetEndOffset);
+                statement.BindText(3, repair.ThreadId);
+                statement.BindText(4, repair.TurnId);
+                statement.BindInt64(5, repair.CurrentStartOffset);
+                statement.BindOptionalInt64(6, repair.CurrentEndOffset);
+                statement.BindOptionalInt64(7, repair.CurrentEndOffset);
+                if (NativeSqlite.sqlite3_step(statement.Handle) != NativeSqlite.SQLITE_DONE || NativeSqlite.sqlite3_changes(_handle) != 1)
+                    throw new InvalidOperationException("thread_turns 偏移已变化，拒绝覆盖。");
+            }
+            Execute("COMMIT");
+        }
+        catch
+        {
+            try { Execute("ROLLBACK"); } catch { }
+            throw;
+        }
+    }
+
+    public void UpdatePaginatedProjectionOffset(PaginatedProjectionOffsetRepair repair)
+    {
+        Execute("BEGIN IMMEDIATE");
+        try
+        {
+            using var statement = Prepare("UPDATE thread_history_projection_state SET next_rollout_byte_offset = ? WHERE thread_id = ? AND next_rollout_byte_offset = ?");
+            statement.BindInt64(1, repair.TargetOffset);
+            statement.BindText(2, repair.ThreadId);
+            statement.BindInt64(3, repair.CurrentOffset);
+            if (NativeSqlite.sqlite3_step(statement.Handle) != NativeSqlite.SQLITE_DONE || NativeSqlite.sqlite3_changes(_handle) != 1)
+                throw new InvalidOperationException("projection 偏移已变化，拒绝覆盖。");
+            Execute("COMMIT");
+        }
+        catch
+        {
+            try { Execute("ROLLBACK"); } catch { }
+            throw;
+        }
+    }
+
+    public void BackupTo(string destination)
+    {
+        if (File.Exists(destination))
+            throw new InvalidOperationException($"备份目标已存在：{destination}");
+        Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+        using var target = new SqliteDatabase(destination, false);
+        var backup = NativeSqlite.sqlite3_backup_init(target._handle, "main", _handle, "main");
+        if (backup == IntPtr.Zero)
+            throw new InvalidOperationException($"SQLite Backup API 初始化失败：{target.ErrorMessage}");
+        var result = NativeSqlite.SQLITE_OK;
+        var retries = 0;
+        do
+        {
+            result = NativeSqlite.sqlite3_backup_step(backup, 256);
+            if (result is NativeSqlite.SQLITE_BUSY or NativeSqlite.SQLITE_LOCKED)
+            {
+                retries++;
+                NativeSqlite.sqlite3_sleep(20);
+            }
+        } while (result == NativeSqlite.SQLITE_OK || (result is NativeSqlite.SQLITE_BUSY or NativeSqlite.SQLITE_LOCKED) && retries < 50);
+        var finish = NativeSqlite.sqlite3_backup_finish(backup);
+        if (result != NativeSqlite.SQLITE_DONE || finish != NativeSqlite.SQLITE_OK)
+            throw new InvalidOperationException("SQLite Backup API 未完成。");
+        target.CheckIntegrity();
+    }
+
+    public void CheckIntegrity()
+    {
+        using var statement = Prepare("PRAGMA integrity_check");
+        if (NativeSqlite.sqlite3_step(statement.Handle) != NativeSqlite.SQLITE_ROW || !string.Equals(statement.Text(0), "ok", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("SQLite integrity_check 失败。");
+    }
+
     public void Execute(string sql)
     {
         var result = NativeSqlite.sqlite3_exec(_handle, sql, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
@@ -1369,6 +1620,8 @@ internal sealed class SqliteDatabase : IDisposable
 
     private string ErrorMessage => Marshal.PtrToStringUTF8(NativeSqlite.sqlite3_errmsg(_handle)) ?? "unknown";
 
+    private string ErrorMessageForBackup => ErrorMessage;
+
     public void Dispose()
     {
         if (_handle != IntPtr.Zero)
@@ -1394,6 +1647,13 @@ internal sealed class SqliteStatement(IntPtr handle) : IDisposable
         NativeSqlite.sqlite3_column_type(Handle, index) == NativeSqlite.SQLITE_NULL ? null : NativeSqlite.sqlite3_column_int64(Handle, index);
     public void BindText(int index, string value) => NativeSqlite.sqlite3_bind_text(Handle, index, value, -1, new IntPtr(-1));
     public void BindInt64(int index, long value) => NativeSqlite.sqlite3_bind_int64(Handle, index, value);
+    public void BindOptionalInt64(int index, long? value)
+    {
+        if (value is long number)
+            NativeSqlite.sqlite3_bind_int64(Handle, index, number);
+        else
+            NativeSqlite.sqlite3_bind_null(Handle, index);
+    }
     public void Reset()
     {
         NativeSqlite.sqlite3_reset(Handle);
@@ -1416,6 +1676,8 @@ internal static class NativeSqlite
     public const int SQLITE_ROW = 100;
     public const int SQLITE_DONE = 101;
     public const int SQLITE_NULL = 5;
+    public const int SQLITE_BUSY = 5;
+    public const int SQLITE_LOCKED = 6;
     public const int SQLITE_OPEN_READONLY = 0x00000001;
     public const int SQLITE_OPEN_READWRITE = 0x00000002;
     public const int SQLITE_OPEN_CREATE = 0x00000004;
@@ -1450,6 +1712,18 @@ internal static class NativeSqlite
     public static extern int sqlite3_bind_int64(IntPtr statement, int index, long value);
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
     public static extern int sqlite3_exec(IntPtr db, [MarshalAs(UnmanagedType.LPUTF8Str)] string sql, IntPtr callback, IntPtr callbackArg, IntPtr errorMessage);
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    public static extern int sqlite3_changes(IntPtr db);
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    public static extern int sqlite3_bind_null(IntPtr statement, int index);
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    public static extern IntPtr sqlite3_backup_init(IntPtr destination, [MarshalAs(UnmanagedType.LPUTF8Str)] string destinationName, IntPtr source, [MarshalAs(UnmanagedType.LPUTF8Str)] string sourceName);
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    public static extern int sqlite3_backup_step(IntPtr backup, int pages);
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    public static extern int sqlite3_backup_finish(IntPtr backup);
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    public static extern int sqlite3_sleep(int milliseconds);
 }
 
 internal sealed class MainForm : Form
@@ -2025,20 +2299,51 @@ internal static class SelfTest
             Directory.CreateDirectory(paginatedDirectory);
             var paginatedRollout = Path.Combine(paginatedDirectory, "rollout-paginated.jsonl");
             File.WriteAllText(paginatedRollout, "{\"timestamp\":\"2026-06-03T12:00:00.000Z\",\"ordinal\":0,\"type\":\"session_meta\",\"payload\":{\"id\":\"paginated\",\"history_mode\":\"paginated\",\"model_provider\":\"openai\"}}" + Environment.NewLine + "{\"ordinal\":1,\"type\":\"event_msg\",\"payload\":{\"message\":\"keep paginated body\"}}" + Environment.NewLine);
-            CreateSingleThreadState(Path.Combine(paginatedRoot, "state_5.sqlite"), "paginated", paginatedRollout);
-            var beforePaginated = File.ReadAllText(paginatedRollout);
-            var beforePaginatedHash = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(paginatedRollout)));
+            var paginatedState = Path.Combine(paginatedRoot, "state_5.sqlite");
+            CreateSingleThreadState(paginatedState, "paginated", paginatedRollout);
+            using (var db = new SqliteDatabase(paginatedState, false))
+                db.Execute("UPDATE threads SET model_provider = 'openai'");
+            var paginatedHistory = Path.Combine(paginatedRoot, "thread_history_1.sqlite");
+            CreatePaginatedHistoryState(paginatedHistory, "paginated", paginatedRollout);
+            var beforePaginated = File.ReadAllBytes(paginatedRollout);
+            var beforePaginatedBody = Encoding.UTF8.GetBytes("{\"ordinal\":1,\"type\":\"event_msg\",\"payload\":{\"message\":\"keep paginated body\"}}" + Environment.NewLine);
             var paginatedScan = service.Scan(new AppSettings { CodexHome = paginatedRoot, OpenCodexAfterRepair = false, AlignProvidersForVisibility = true });
-            Assert(paginatedScan.PaginatedProviderWarnings.Count == 1, "Paginated Provider warning was not reported.");
+            Assert(paginatedScan.PaginatedProviderWarnings.Count == 0, "A valid paginated Provider plan was incorrectly downgraded to a warning.");
+            Assert(paginatedScan.PaginatedProviderRepairs.Count == 1, "Paginated Provider repair was not planned.");
             Assert(paginatedScan.SqliteProviderUpdates.Count == 0, "Paginated thread was incorrectly added to SQLite Provider writes.");
-            Assert(paginatedScan.RolloutRepairs.Count == 0, "Paginated rollout was incorrectly added to header writes.");
-            if (paginatedScan.HasRepairs)
-                service.Repair(paginatedScan, new AppSettings { CodexHome = paginatedRoot, OpenCodexAfterRepair = false, AlignProvidersForVisibility = true }, BackupMode.Lightweight, true);
-            Assert(File.ReadAllText(paginatedRollout) == beforePaginated, "Paginated rollout was modified by Windows repair.");
-            Assert(Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(paginatedRollout))) == beforePaginatedHash, "Paginated rollout hash changed during Windows repair.");
+            Assert(paginatedScan.RolloutRepairs.Count == 0, "Paginated rollout was incorrectly added to ordinary header writes.");
+            var paginatedRepair = paginatedScan.PaginatedProviderRepairs[0];
+            service.RepairPaginated(paginatedScan, paginatedRepair, new AppSettings { CodexHome = paginatedRoot, OpenCodexAfterRepair = false, AlignProvidersForVisibility = true }, BackupMode.Lightweight, true);
+            var afterPaginated = File.ReadAllBytes(paginatedRollout);
+            Assert(afterPaginated.AsSpan(afterPaginated.Length - beforePaginatedBody.Length).SequenceEqual(beforePaginatedBody), "Paginated rollout body changed during repair.");
             var postPaginated = service.Scan(new AppSettings { CodexHome = paginatedRoot, OpenCodexAfterRepair = false, AlignProvidersForVisibility = true });
-            Assert(postPaginated.PaginatedProviderWarnings.Count == 1, "Paginated Provider warning disappeared without a paginated repair.");
+            Assert(postPaginated.PaginatedProviderWarnings.Count == 0 && postPaginated.PaginatedProviderRepairs.Count == 0, "Paginated Provider repair did not converge.");
             Assert(postPaginated.SqliteProviderUpdates.Count == 0 && postPaginated.RolloutRepairs.Count == 0, "Paginated Provider writes reappeared after safe repair.");
+
+            var historyRoot = Path.Combine(root, "history-entrypoint");
+            Directory.CreateDirectory(historyRoot);
+            File.WriteAllText(Path.Combine(historyRoot, "config.toml"), "model_provider = \"custom\"" + Environment.NewLine);
+            var historyDirectory = Path.Combine(historyRoot, "sessions", "2026", "06", "04");
+            Directory.CreateDirectory(historyDirectory);
+            const string logicalHistoryId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+            const string physicalRootId = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+            const string physicalChildId = "cccccccc-cccc-cccc-cccc-cccccccccccc";
+            var historyRootPath = Path.Combine(historyDirectory, $"rollout-2026-06-04T00-00-00-{logicalHistoryId}_{physicalRootId}.jsonl");
+            var historyChildPath = Path.Combine(historyDirectory, $"rollout-2026-06-04T00-01-00-{logicalHistoryId}_{physicalChildId}.jsonl");
+            var historyRootLine = "{\"ordinal\":0,\"type\":\"session_meta\",\"payload\":{\"id\":\"" + logicalHistoryId + "\",\"history_mode\":\"paginated\"}}" + Environment.NewLine;
+            File.WriteAllText(historyRootPath, historyRootLine);
+            var historyChildLine = "{\"ordinal\":1,\"type\":\"session_meta\",\"payload\":{\"id\":\"" + logicalHistoryId + "\",\"history_mode\":\"paginated\",\"history_base\":{\"thread_id\":\"" + physicalRootId + "\",\"end_ordinal_exclusive\":1,\"end_byte_offset\":" + Encoding.UTF8.GetByteCount(historyRootLine) + "}}}" + Environment.NewLine;
+            File.WriteAllText(historyChildPath, historyChildLine + "{\"ordinal\":2,\"type\":\"event_msg\",\"payload\":{\"message\":\"new branch\"}}" + Environment.NewLine);
+            CreateHistoryEntrypointState(Path.Combine(historyRoot, "state_5.sqlite"), logicalHistoryId, historyRootPath);
+            var historyService = new HistoryEntrypointService();
+            var historyScan = historyService.Scan(new AppSettings { CodexHome = historyRoot, OpenCodexAfterRepair = false });
+            Assert(historyScan.Diagnoses.Count == 1 && historyScan.Diagnoses[0].ProposedPath == historyChildPath, "Chat entrypoint lineage was not diagnosed.");
+            var historyRecord = historyService.Repair(historyScan, historyScan.Diagnoses[0], new AppSettings { CodexHome = historyRoot, OpenCodexAfterRepair = false }, true);
+            var repairedHistoryScan = historyService.Scan(new AppSettings { CodexHome = historyRoot, OpenCodexAfterRepair = false });
+            Assert(repairedHistoryScan.Diagnoses[0].ProposedPath is null && repairedHistoryScan.Diagnoses[0].CurrentPath == historyChildPath, "Chat entrypoint repair did not converge.");
+            historyService.Rollback(historyRecord, new AppSettings { CodexHome = historyRoot, OpenCodexAfterRepair = false }, true);
+            var rolledBackHistoryScan = historyService.Scan(new AppSettings { CodexHome = historyRoot, OpenCodexAfterRepair = false });
+            Assert(rolledBackHistoryScan.Diagnoses[0].ProposedPath == historyChildPath && rolledBackHistoryScan.Diagnoses[0].CurrentPath == historyRootPath, "Chat entrypoint rollback did not restore the original path.");
 
             var migratedRoot = Path.Combine(root, "migrated-sqlite-home");
             Directory.CreateDirectory(migratedRoot);
@@ -2116,5 +2421,27 @@ internal static class SelfTest
                 ''
             )
             """);
+    }
+
+    private static void CreatePaginatedHistoryState(string historyPath, string threadId, string rolloutPath)
+    {
+        var bytes = File.ReadAllBytes(rolloutPath);
+        var newline = Array.IndexOf(bytes, (byte)'\n');
+        if (newline < 0)
+            throw new InvalidOperationException("Paginated self-test rollout has no newline.");
+        var firstEnd = newline + 1;
+        var fileLength = bytes.Length;
+        using var db = new SqliteDatabase(historyPath, false);
+        db.Execute("CREATE TABLE thread_turns(thread_id TEXT, turn_id TEXT, rollout_ordinal INTEGER, rollout_byte_offset INTEGER, rollout_end_ordinal INTEGER, rollout_end_byte_offset INTEGER, PRIMARY KEY(thread_id, turn_id))");
+        db.Execute("CREATE TABLE thread_history_projection_state(thread_id TEXT PRIMARY KEY, next_rollout_byte_offset INTEGER, next_rollout_ordinal INTEGER)");
+        db.Execute($"INSERT INTO thread_turns VALUES ('{threadId}', 'turn-1', 1, {firstEnd}, 2, {fileLength})");
+        db.Execute($"INSERT INTO thread_history_projection_state VALUES ('{threadId}', {fileLength}, 2)");
+    }
+
+    private static void CreateHistoryEntrypointState(string statePath, string threadId, string rolloutPath)
+    {
+        using var db = new SqliteDatabase(statePath, false);
+        db.Execute("CREATE TABLE threads(id TEXT PRIMARY KEY, rollout_path TEXT, title TEXT, history_mode TEXT)");
+        db.Execute($"INSERT INTO threads VALUES ('{threadId}', '{rolloutPath.Replace("'", "''")}', 'History self-test', 'paginated')");
     }
 }

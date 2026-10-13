@@ -25,7 +25,7 @@ using WpfSize = System.Windows.Size;
 
 namespace CodexSynced.Windows;
 
-internal enum UiSection { Home, Pending, Backups, Settings }
+internal enum UiSection { Home, Pending, History, Backups, Settings }
 internal enum UiLanguage { Zh, En }
 
 internal sealed class MainWindow : Window
@@ -49,7 +49,10 @@ internal sealed class MainWindow : Window
     private readonly List<WpfButton> _navButtons = [];
     private readonly Dictionary<WpfButton, UiLanguage> _languageButtons = [];
     private readonly Dictionary<WpfButton, BackupMode> _modeButtons = [];
+    private readonly HistoryEntrypointService _historyService = new();
     private ScanResult? _scan;
+    private HistoryScanResult? _historyScan;
+    private List<HistoryRepairRecord> _historyRecords = [];
     private string? _scanError;
     private UiSection _section;
     private UiLanguage _language = UiLanguage.Zh;
@@ -151,6 +154,7 @@ internal sealed class MainWindow : Window
         _navButtons.Clear();
         AddNav(UiSection.Home, "⌂", T("首页", "Home"));
         AddNav(UiSection.Pending, "☷", T("待修复项", "Pending"));
+        AddNav(UiSection.History, "▱", T("对话修复", "Chat Repair"));
         AddNav(UiSection.Backups, "▣", T("备份", "Backups"));
         AddNav(UiSection.Settings, "⚙", T("设置", "Settings"));
         UpdateNav();
@@ -205,6 +209,7 @@ internal sealed class MainWindow : Window
     private UIElement CurrentView() => _section switch
     {
         UiSection.Pending => BuildPending(),
+        UiSection.History => BuildHistory(),
         UiSection.Backups => BuildBackups(),
         UiSection.Settings => BuildSettings(),
         _ => BuildHome()
@@ -331,7 +336,7 @@ internal sealed class MainWindow : Window
         var failed = _scanError is not null;
         var s = new StackPanel();
         s.Children.Add(Text(_busy ? T("正在处理", "Working") : failed ? T("扫描遇到问题", "Scan Needs Attention") : repairs ? T("发现待修复项", "Repairs Found") : warnings ? T("发现分页风险", "Paginated Review Needed") : T("侧边栏状态正常", "Sidebar Looks Healthy"), 16, FontWeights.SemiBold, Ink));
-        var sub = Text(_busy ? _busyDetail : failed ? _scanError! : repairs ? T($"发现 {_scan!.PendingCount} 项侧边栏摘要问题。下一步查看变更并选择备份模式。", $"Found {_scan!.PendingCount} sidebar summary issues. Review changes and select a backup mode.") : warnings ? T($"发现 {_scan!.PaginatedProviderWarnings.Count} 个分页 Provider 不一致。Windows 本版不会直接改写其首行，请人工确认或使用 macOS 分页修复流程。", $"Found {_scan!.PaginatedProviderWarnings.Count} paginated Provider mismatches. This Windows build will not rewrite their headers; review manually or use the macOS paginated repair flow.") : T("当前没有待处理项。重新扫描即可检查本地历史。", "No pending items. Scan again to check local history state."), 12, FontWeights.Normal, failed || warnings ? Warn : Muted);
+        var sub = Text(_busy ? _busyDetail : failed ? _scanError! : repairs ? T($"发现 {_scan!.PendingCount} 项侧边栏摘要问题。下一步查看变更并选择备份模式。", $"Found {_scan!.PendingCount} sidebar summary issues. Review changes and select a backup mode.") : warnings ? T($"发现分页 Provider 复核项。普通修复不会改写分页首行；通过校验的项目可在下方独立确认。", $"Paginated Provider review items were found. Ordinary repair never rewrites paginated headers; validated items can be confirmed separately below.") : T("当前没有待处理项。重新扫描即可检查本地历史。", "No pending items. Scan again to check local history state."), 12, FontWeights.Normal, failed || warnings ? Warn : Muted);
         sub.Margin = new Thickness(0, 4, 0, 14);
         sub.TextWrapping = TextWrapping.Wrap;
         s.Children.Add(sub);
@@ -354,6 +359,7 @@ internal sealed class MainWindow : Window
             (_settings.AlignProvidersForVisibility ? T("对齐到当前 Provider 的 SQLite 记录", "SQLite rows aligned to active provider") : T("按 rollout 修正 Provider 的 SQLite 记录", "SQLite provider rows matched to rollout"), (_scan?.SqliteProviderUpdates.Count ?? 0).ToString()),
             (T("待对齐 rollout Provider", "Rollout providers to align"), (_scan?.RolloutRepairs.Count ?? 0).ToString()),
             (T("分页 Provider 风险", "Paginated Provider warnings"), (_scan?.PaginatedProviderWarnings.Count ?? 0).ToString()),
+            (T("可安全重算分页偏移", "Validated paginated repairs"), (_scan?.PaginatedProviderRepairs.Count ?? 0).ToString()),
             (T("待写入短标题", "Sidebar title rows"), (_scan?.SqliteTitleRepairs.Count ?? 0).ToString()),
             (T("待修复更新时间", "Timestamp rows"), ((_scan?.SqliteTimestampRepairs.Count ?? 0) + (_scan?.RolloutMtimeRepairs.Count ?? 0)).ToString()),
             (T("待重建索引条目", "Index entries to rebuild"), (_scan?.IndexRepairs.Count ?? 0).ToString()),
@@ -374,6 +380,53 @@ internal sealed class MainWindow : Window
             : Page(T("待修复项", "Pending Repairs"), T("修复前预览，不会写入数据，确认后先备份再修复。", "Dry-run preview. Confirming creates a backup before changes."), summary, Panel(choice), Panel(PreviewList()));
     }
 
+    private UIElement BuildHistory()
+    {
+        var content = new List<UIElement>
+        {
+            Panel(TextBlockPair(T("只改读取入口，不拼接正文", "Repair the entrypoint, never concatenate messages"), T("扫描只读。入口修复或撤销前必须退出 Codex；多个末端、缺失父分支、序号或字节边界不一致会停在人工确认。", "Scanning is read-only. Quit Codex before repair or rollback; ambiguous tips, missing parents, ordinal gaps, and byte-boundary mismatches require manual review."))),
+            Panel(Row(Button(T("只读扫描", "Read-only Scan"), false, ScanHistoryAsync), Button(T("打开修复记录", "Open Repair Records"), false, () => RepairService.OpenDirectory(Path.Combine(_settings.CodexHome, "history-entrypoint-backups")))))
+        };
+        if (_historyScan is null)
+        {
+            content.Add(Panel(Empty("⌁", T("尚未扫描对话入口", "Chat entrypoints have not been scanned"), T("扫描会沿 history_base 检查唯一后继链，不会写入文件。", "The scan follows history_base and never writes files."))));
+        }
+        else
+        {
+            content.Add(Panel(TextBlockPair(T("状态库", "State database"), _historyScan.Database)));
+            foreach (var warning in _historyScan.Warnings)
+            {
+                var text = Text(warning, 12, FontWeights.Normal, Warn, mono: true);
+                text.TextWrapping = TextWrapping.Wrap;
+                content.Add(Panel(text));
+            }
+            if (_historyScan.Diagnoses.Count == 0)
+                content.Add(Panel(Empty("✓", T("未发现可识别的分页对话", "No recognized paginated chats"), T("这不代表所有历史都已验证；旧格式不在此入口修复范围内。", "This is not an all-clear; legacy formats are outside this repair entrypoint."))));
+            foreach (var diagnosis in _historyScan.Diagnoses.OrderBy(item => item.CanRepair ? 0 : 1).ThenBy(item => item.Id, StringComparer.OrdinalIgnoreCase))
+            {
+                var stack = new StackPanel();
+                stack.Children.Add(Text(PreviewTitle(diagnosis.Title, diagnosis.Id), 15, FontWeights.SemiBold, Ink));
+                stack.Children.Add(Text(diagnosis.Id, 12, FontWeights.Normal, Muted, mono: true));
+                stack.Children.Add(Text(diagnosis.Detail, 12, FontWeights.Normal, diagnosis.CanRepair ? Blue : Muted));
+                stack.Children.Add(Text(T("当前入口", "Current entrypoint") + ": " + diagnosis.CurrentPath, 11, FontWeights.Normal, Muted, mono: true));
+                if (diagnosis.ProposedPath is not null)
+                {
+                    stack.Children.Add(Text(T("建议入口", "Proposed entrypoint") + ": " + diagnosis.ProposedPath, 11, FontWeights.Normal, Muted, mono: true));
+                    stack.Children.Add(Text(T($"有效继承范围内 message 记录：{diagnosis.MessageCount}（非客户端轮数）", $"Message records in effective lineage: {diagnosis.MessageCount} (not client turns)"), 11, FontWeights.Normal, Muted));
+                    stack.Children.Add(Button(T("预览并修复这一条", "Review and repair this chat"), false, () => RepairHistoryAsync(diagnosis), _busy));
+                }
+                content.Add(Panel(stack));
+            }
+            if (_historyRecords.Count > 0)
+            {
+                content.Add(Text(T("修复记录与安全撤销", "Repair records and safe rollback"), 16, FontWeights.SemiBold, Ink));
+                foreach (var record in _historyRecords)
+                    content.Add(Panel(Row(TextBlockPair(PreviewTitle(record.Title, record.ThreadId), $"{record.CreatedAt.ToLocalTime():g}\n{record.OldPath} → {record.NewPath}"), Button(T("检查并撤销", "Check & Revert"), false, () => RollbackHistoryAsync(record), _busy))));
+            }
+        }
+        return Page(T("对话诊断与修复", "Chat Diagnosis & Repair"), T("针对原始 JSONL 仍在、但主入口停留旧分支导致后续消息不显示的分页对话。", "For paginated chats whose JSONL exists but the main entrypoint still points to an older branch."), content.ToArray());
+    }
+
     private UIElement PreviewList()
     {
         var s = new StackPanel();
@@ -384,6 +437,8 @@ internal sealed class MainWindow : Window
         foreach (var row in rows) s.Children.Add(PreviewRow(row));
         var hidden = PreviewRows(_scan).Count - rows.Count;
         if (hidden > 0) s.Children.Add(Text(T($"还有 {hidden} 条记录未显示。", $"{hidden} more rows hidden."), 12, FontWeights.Normal, Muted));
+        if (_scan.HasPaginatedReview)
+            s.Children.Add(PaginatedWarningPanel());
         return s;
     }
 
@@ -399,6 +454,27 @@ internal sealed class MainWindow : Window
         }
         if ((_scan?.PaginatedProviderWarnings.Count ?? 0) > 5)
             s.Children.Add(Text(T($"还有 {(_scan?.PaginatedProviderWarnings.Count ?? 0) - 5} 个风险项未显示。", $"{(_scan?.PaginatedProviderWarnings.Count ?? 0) - 5} more warnings hidden."), 12, FontWeights.Normal, Muted));
+        foreach (var diagnostic in (_scan?.PaginatedProviderDiagnostics ?? []).Take(5))
+        {
+            var detail = Text(diagnostic, 12, FontWeights.Normal, Warn, mono: true);
+            detail.TextWrapping = TextWrapping.Wrap;
+            s.Children.Add(detail);
+        }
+        if ((_scan?.PaginatedProviderRepairs.Count ?? 0) > 0)
+        {
+            s.Children.Add(Divider());
+            s.Children.Add(Text(T("可安全重算分页偏移", "Validated paginated repairs"), 14, FontWeights.SemiBold, Blue));
+            foreach (var repair in _scan!.PaginatedProviderRepairs)
+            {
+                var grid = new Grid { Margin = new Thickness(0, 8, 0, 0) };
+                grid.ColumnDefinitions.Add(new ColumnDefinition());
+                grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+                var detail = TextBlockPair(PreviewTitle(repair.Title, repair.ThreadId), $"{repair.RolloutRepairs.Count} rollout · {repair.TurnOffsetRepairs.Count} turn · {repair.ProjectionOffsetRepairs.Count} projection");
+                AddTo(grid, detail, 0);
+                AddTo(grid, Button(T("预览并修复", "Review & Repair"), false, () => RepairPaginatedAsync(repair), _busy), 1);
+                s.Children.Add(grid);
+            }
+        }
         return s;
     }
 
@@ -451,6 +527,70 @@ internal sealed class MainWindow : Window
         catch (Exception ex) { _scanError = ex.Message; _busy = false; TryShowCurrent(true); Notice(T("扫描失败", "Scan Failed"), ex.Message, Warn); }
     }
 
+    private async void ScanHistoryAsync()
+    {
+        SetBusy(T("扫描对话入口", "Scanning chat entrypoints"), T("沿 history_base 检查唯一后继链、序号和字节边界。", "Following history_base and checking unique lineage, ordinals, and byte boundaries."), .36);
+        try
+        {
+            _historyScan = await Task.Run(() => _historyService.Scan(SnapshotSettings()));
+            _historyRecords = await Task.Run(() => _historyService.Records(SnapshotSettings()));
+            _busy = false;
+            Show(CurrentView(), true);
+        }
+        catch (Exception ex)
+        {
+            _busy = false;
+            TryShowCurrent(true);
+            Notice(T("对话扫描失败", "Chat scan failed"), ex.Message, Warn);
+        }
+    }
+
+    private async void RepairHistoryAsync(HistoryDiagnosis diagnosis)
+    {
+        if (_historyScan is null || !diagnosis.CanRepair || _busy)
+            return;
+        if (System.Windows.MessageBox.Show(T("将先备份含 WAL 的状态库与原始分支文件，只修改这一条 rollout_path。继续吗？", "A WAL-consistent state backup and original branch copies will be created. Only this rollout_path will change. Continue?"), T("确认最小入口修复", "Confirm minimal entrypoint repair"), MessageBoxButton.OKCancel, MessageBoxImage.Warning) != MessageBoxResult.OK)
+            return;
+        SetBusy(T("备份并修复对话入口", "Backing up and repairing entrypoint"), T("正在副本试写并复核文件哈希。", "Trialing the database copy and checking file hashes."), .48);
+        try
+        {
+            await Task.Run(() => _historyService.Repair(_historyScan, diagnosis, SnapshotSettings()));
+            _historyScan = await Task.Run(() => _historyService.Scan(SnapshotSettings()));
+            _historyRecords = await Task.Run(() => _historyService.Records(SnapshotSettings()));
+            Notice(T("入口修复完成", "Entrypoint repair complete"), T("只修改了 rollout_path。请重新打开并重启 Codex，逐条核对正文、遗漏、重复和项目归属。", "Only rollout_path changed. Reopen and restart Codex, then verify message order, omissions, duplicates, and project ownership."), Ok);
+            _busy = false;
+            Show(CurrentView(), true);
+        }
+        catch (Exception ex)
+        {
+            _busy = false;
+            TryShowCurrent(true);
+            Notice(T("入口修复失败", "Entrypoint repair failed"), ex.Message, Warn);
+        }
+    }
+
+    private async void RollbackHistoryAsync(HistoryRepairRecord record)
+    {
+        if (_busy || System.Windows.MessageBox.Show(T("只在目标记录和文件未变化时撤销入口修改。继续吗？", "Rollback only if metadata and files are unchanged. Continue?"), T("确认安全撤销", "Confirm safe rollback"), MessageBoxButton.OKCancel, MessageBoxImage.Warning) != MessageBoxResult.OK)
+            return;
+        SetBusy(T("检查并撤销入口", "Checking and rolling back entrypoint"), T("不会恢复整库，也不会覆盖新消息。", "The whole database will not be restored and new messages will not be overwritten."), .42);
+        try
+        {
+            await Task.Run(() => _historyService.Rollback(record, SnapshotSettings()));
+            _historyScan = await Task.Run(() => _historyService.Scan(SnapshotSettings()));
+            _historyRecords = await Task.Run(() => _historyService.Records(SnapshotSettings()));
+            Notice(T("入口已撤销", "Entrypoint rolled back"), T("已恢复这一条 rollout_path。", "This rollout_path was restored."), Ok);
+            _busy = false;
+            Show(CurrentView(), true);
+        }
+        catch (Exception ex)
+        {
+            _busy = false;
+            TryShowCurrent(true);
+            Notice(T("撤销失败", "Rollback failed"), ex.Message, Warn);
+        }
+    }
+
     private void TryShowCurrent(bool animate)
     {
         try
@@ -486,6 +626,31 @@ internal sealed class MainWindow : Window
         SetBusy(T("备份并修复", "Backing up and repairing"), T("正在创建备份并写入 SQLite、rollout 和索引。", "Creating backup and writing SQLite, rollout, and index changes."), .48);
         try { var scan = _scan; await Task.Run(() => _service.Repair(scan, SnapshotSettings(), _backupMode)); Notice(T("修复完成", "Repair Complete"), T("侧边栏会话摘要已经修复。", "Sidebar conversation summaries were repaired."), Ok); await ScanAsync(); if (_settings.OpenCodexAfterRepair) RepairService.OpenCodex(); }
         catch (Exception ex) { _busy = false; TryShowCurrent(true); Notice(T("修复失败", "Repair Failed"), ex.Message, Warn); }
+    }
+
+    private async void RepairPaginatedAsync(PaginatedProviderRepair repair)
+    {
+        if (_busy)
+            return;
+        var message = T(
+            $"将先备份状态库、历史库和相关 rollout，再同步改写 {repair.RolloutRepairs.Count} 个分页首行、{repair.TurnOffsetRepairs.Count} 个 turn 偏移和 {repair.ProjectionOffsetRepairs.Count} 个 projection 偏移。不会拼接正文。继续吗？",
+            $"This will back up the state/history databases and rollouts, then update {repair.RolloutRepairs.Count} paginated headers, {repair.TurnOffsetRepairs.Count} turn offsets, and {repair.ProjectionOffsetRepairs.Count} projection offsets. Bodies are never concatenated. Continue?");
+        if (System.Windows.MessageBox.Show(message, T("确认分页修复", "Confirm paginated repair"), MessageBoxButton.OKCancel, MessageBoxImage.Warning) != MessageBoxResult.OK)
+            return;
+        SetBusy(T("备份并修复分页 Provider", "Backing up and repairing paginated Provider"), T("正在试写副本并校验 SQLite、字节边界和正文哈希。", "Trialing database and rollout copies, then checking offsets and body hashes."), .48);
+        try
+        {
+            var scan = _scan!;
+            await Task.Run(() => _service.RepairPaginated(scan, repair, SnapshotSettings(), _backupMode));
+            Notice(T("分页修复完成", "Paginated repair complete"), T("已同步 Provider、history_base、turn 偏移和 projection。重新打开并重启 Codex 后仍需人工核对正文。", "Provider, history_base, turn offsets, and projection are synchronized. Reopen and restart Codex, then manually verify message content."), Ok);
+            await ScanAsync();
+        }
+        catch (Exception ex)
+        {
+            _busy = false;
+            TryShowCurrent(true);
+            Notice(T("分页修复失败", "Paginated repair failed"), ex.Message, Warn);
+        }
     }
 
     private async void RestoreAsync(BackupRecord backup)
@@ -646,6 +811,7 @@ internal sealed class MainWindow : Window
         rows.AddRange(scan.SqliteProviderUpdates.Select(repair => new PreviewItem(_settings.AlignProvidersForVisibility ? T("Provider 对齐", "Provider Align") : "Provider", "▦", PreviewTitle(repair.Thread.Title, repair.Thread.Id), $"{repair.Thread.ModelProvider} -> {repair.TargetProvider}")));
         rows.AddRange(scan.RolloutRepairs.Select(repair => new PreviewItem(T("rollout Provider", "Rollout Provider"), "▣", PreviewTitle(repair.SessionId, Path.GetFileName(repair.Path)), $"{repair.CurrentProvider ?? "nil"} -> {repair.TargetProvider}")));
         rows.AddRange(scan.PaginatedProviderWarnings.Select(warning => new PreviewItem(T("分页 Provider 风险", "Paginated Provider review"), "!", PreviewTitle(warning.Title, warning.ThreadId), $"{warning.CurrentProvider} -> {warning.TargetProvider} · {Path.GetFileName(warning.RolloutPath)}")));
+        rows.AddRange(scan.PaginatedProviderRepairs.Select(repair => new PreviewItem(T("分页 Provider 可修复", "Paginated Provider ready"), "↻", PreviewTitle(repair.Title, repair.ThreadId), $"{repair.RolloutRepairs.Count} rollout · {repair.TurnOffsetRepairs.Count} turn · {repair.ProjectionOffsetRepairs.Count} projection")));
         rows.AddRange(scan.SqliteTitleRepairs.Select(repair => new PreviewItem(T("标题", "Title"), "T", PreviewTitle(repair.TargetTitle, repair.ThreadId), PreviewTitle(repair.CurrentTitle, T("空标题", "empty title")))));
         rows.AddRange(scan.SqliteTimestampRepairs.Select(repair => new PreviewItem(T("时间", "Time"), "◷", PreviewTitle(repair.Title, repair.ThreadId), $"{repair.CurrentUpdatedAtMs} -> {repair.TargetUpdatedAtMs}")));
         rows.AddRange(scan.RolloutMtimeRepairs.Select(repair => new PreviewItem("mtime", "◴", PreviewTitle(repair.Title, repair.ThreadId), $"{repair.CurrentMtimeMs} -> {repair.TargetMtimeMs}")));

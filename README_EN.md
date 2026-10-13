@@ -14,7 +14,7 @@ This release unifies provider-switch visibility repair, paginated-risk warnings,
 - **WAL-consistent backups**: lightweight backups retain live SQLite/WAL/SHM files and create SQLite Backup API snapshots for present `state_*`, `thread_history_*`, and `logs_*` databases.
 - **Scoped unknown-file blocking**: temporary, repair, and backup artifacts are ignored; an unrecognized rollout only blocks chats in its own directory.
 - **Unified risk UI**: the pending-repair and chat-repair pages now use the same status, risk, and verification-boundary cards.
-- **Windows paginated safety boundary**: Windows scans identify paginated rollouts and show Provider mismatches as manual-review risks. Paginated threads are excluded from ordinary SQLite Provider alignment and rollout-header writes. The complete byte-offset recalculation engine is not yet ported to Windows; see the [Windows paginated safety plan](docs/windows-paginated-safety-plan.md).
+- **Windows paginated parity**: Windows now includes the independent lineage, `history_base`, `thread_turns`, and projection repair planner; ordinary repair and paginated confirmation remain separate. The Windows build, self-test, and real-copy acceptance must pass before this path is included in a release artifact. See the [Windows paginated repair plan](docs/windows-paginated-safety-plan.md).
 
 ## 1.6.0: safe paginated Provider repair
 
@@ -30,7 +30,7 @@ The full test suite and Release build pass. After applying a repair, reopen and 
 
 ## 1.4.0: Chat Diagnosis & Entrypoint Repair (experimental, macOS)
 
-The new **Chat Repair** page addresses paginated chats whose JSONL files still exist but whose logical thread points to an older branch. It is separate from sidebar repair and the complete entrypoint repair remains macOS-only. Windows now diagnoses paginated Provider risks and protects their rollout headers, but does not yet recalculate paginated byte offsets.
+The new **Chat Repair** page addresses paginated chats whose JSONL files still exist but whose logical thread points to an older branch. It is separate from sidebar repair. Both macOS and Windows now provide read-only lineage diagnosis, minimal entrypoint repair, and guarded rollback. Windows paginated Provider offset repair also has its own explicit confirmation flow and never runs through ordinary Provider alignment.
 
 [1.4.0 release notes](docs/release/v1.4.0-en.md)
 
@@ -77,7 +77,8 @@ Regression coverage was also added for database selection, archived threads, cor
 2. Quit Codex.
 3. Install the MSI, then open `Codex Synced` from the Start menu.
 4. Review pending changes, choose a backup mode, then apply the repair.
-5. Reopen Codex and verify that local history is visible.
+5. For paginated Provider cases or hidden follow-up messages, open **Chat Repair**, run a read-only scan, and confirm paginated or entrypoint repair one chat at a time.
+6. Reopen and restart Codex, then verify message content, order, omissions, duplicates, and project ownership.
 
 The Windows build is a full desktop app installer. It defaults to `%USERPROFILE%\.codex`, automatically detects the active state database directory, and the directory can be changed in settings. The Release also includes `Codex-Synced-Windows-x64-1.5.0.zip` for users who prefer a manually extracted app directory.
 

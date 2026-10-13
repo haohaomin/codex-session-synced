@@ -20,7 +20,7 @@ Codex Synced 是一个 Windows / macOS 本地修复工具，用来解决 Codex D
 - **WAL 一致备份**：轻量备份保留活动数据库的主文件、WAL/SHM，并额外写入 `SQLite Backup API` 一致快照；同时覆盖存在的 `state_*`、`thread_history_*` 和 `logs_*` 数据库。
 - **局部未知文件阻断**：临时文件、修复残留和备份副本会被忽略；无法识别的 rollout 只阻断同目录会话，不再让无关目录全部停摆。
 - **统一风险界面**：待修复项和对话修复页使用统一的状态卡片、风险卡片和验收边界文案。
-- **Windows 分页安全边界**：Windows 扫描会识别分页 rollout，并将 Provider 不一致单独列为人工确认风险；分页线程不会进入普通 SQLite Provider 对齐或 rollout 首行写入计划。当前 Windows 版本尚未移植完整的字节偏移重算器，详见 [Windows 分页安全方案](docs/windows-paginated-safety-plan.md)。
+- **Windows 分页统一链路**：Windows 已移植分页 lineage、`history_base`、`thread_turns` 与 projection 的独立修复计划，并将普通修复与分页确认入口分开；通过 Windows 构建机编译、自测和真实副本验收后才纳入发布包，详见 [Windows 分页修复方案](docs/windows-paginated-safety-plan.md)。
 
 ## 1.6.0：分页 Provider 安全修复
 
@@ -36,7 +36,7 @@ Codex Synced 是一个 Windows / macOS 本地修复工具，用来解决 Codex D
 
 ## 1.4.0：对话诊断与入口修复（macOS 实验性功能）
 
-新增独立的「对话修复」页面，用于**原始 JSONL 仍在，但主对话入口停留在旧分支，导致后续消息不显示**的情况。本功能不混入原有侧边栏一键修复；完整入口修复仍仅 macOS 提供。Windows 端现已具备分页 Provider 风险识别和写入保护，但不提供完整分页偏移重算。
+新增独立的「对话修复」页面，用于**原始 JSONL 仍在，但主对话入口停留在旧分支，导致后续消息不显示**的情况。本功能不混入原有侧边栏一键修复；macOS 与 Windows 均提供只读 lineage 诊断、最小入口修复和安全撤销。Windows 的分页 Provider 偏移修复也使用独立确认入口，不混入普通 Provider 修复。
 
 [1.4.0 发布说明](docs/release/v1.4.0.md)
 
@@ -88,7 +88,8 @@ Codex Synced 是一个 Windows / macOS 本地修复工具，用来解决 Codex D
 2. 退出 Codex。
 3. 双击 MSI 完成安装，然后从开始菜单打开 `Codex Synced`。
 4. 查看待修复项，选择备份模式，点击“备份并修复”。
-5. 重新打开 Codex，检查历史会话。
+5. 分页 Provider 或后续消息不可见时，进入“对话修复”，先只读扫描，再逐条确认分页修复或入口修复。
+6. 重新打开并重启 Codex，检查历史会话正文、顺序、遗漏、重复和项目归属。
 
 Windows 版是完整桌面应用安装包，默认读取 `%USERPROFILE%\.codex`，并会自动识别当前活跃的状态库目录；也可以在设置中修改目录。Release 中也提供 `Codex-Synced-Windows-x64-1.5.0.zip`，用于不想安装时手动运行应用目录。
 

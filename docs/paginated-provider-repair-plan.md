@@ -33,4 +33,4 @@ Provider 切换后，分页 rollout 的 `session_meta` 首行长度可能发生�
 
 ## 当前状态
 
-方案先行，v1.5.0 的基础诊断与安全备份已发布；本方案对应的分页 Provider 第二阶段尚在实现和测试中。未通过全部验收前，不修改用户真实 Codex 数据，也不发布 v1.6.0。
+macOS 1.6.0 已完成并发布本方案的第二阶段修复：唯一 lineage、字节增量、`thread_turns`、projection、副本试写、WAL 一致备份、CAS 写入和失败恢复均已覆盖。Windows 端随后移植同一套规划与写入边界；在 Windows 构建机完成编译、自测和真实副本验收前，不宣称 Windows 分页修复已发布。

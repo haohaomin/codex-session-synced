@@ -416,11 +416,11 @@ internal sealed class RepairService
     {
         if (!ignoreCodexRunning && IsCodexRunning())
             throw new InvalidOperationException("检测到 Codex 正在运行。请先退出 Codex，再执行分页修复。");
-        if (!scan.PaginatedProviderRepairs.Any(item => item.Equals(repair)))
+        if (!scan.PaginatedProviderRepairs.Any(item => item.Matches(repair)))
             throw new InvalidOperationException("分页修复预览已过期，请重新扫描。");
         var fresh = Scan(settings);
         var current = fresh.PaginatedProviderRepairs.FirstOrDefault(item => item.ThreadId.Equals(repair.ThreadId, StringComparison.OrdinalIgnoreCase));
-        if (current is null || !current.Equals(repair))
+        if (current is null || !current.Matches(repair))
             throw new InvalidOperationException("分页修复预览已过期，请重新扫描。");
         if (repair.RolloutRepairs.Count == 0 && repair.TurnOffsetRepairs.Count == 0 && repair.ProjectionOffsetRepairs.Count == 0)
             throw new InvalidOperationException("没有可写入的分页修复项。");

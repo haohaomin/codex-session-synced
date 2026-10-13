@@ -53,6 +53,19 @@ internal sealed record PaginatedProviderRepair(
     List<PaginatedProjectionOffsetRepair> ProjectionOffsetRepairs)
 {
     public bool IsMeaningful => RolloutRepairs.Count > 0 || TurnOffsetRepairs.Count > 0 || ProjectionOffsetRepairs.Count > 0;
+
+    // Records compare List<T> fields by reference. A fresh read-only scan creates
+    // new lists, so compare the repair plan structurally when validating a preview.
+    public bool Matches(PaginatedProviderRepair other)
+        => string.Equals(ThreadId, other.ThreadId, StringComparison.OrdinalIgnoreCase)
+           && string.Equals(Title, other.Title, StringComparison.Ordinal)
+           && string.Equals(TargetProvider, other.TargetProvider, StringComparison.Ordinal)
+           && string.Equals(CurrentSQLiteProvider, other.CurrentSQLiteProvider, StringComparison.Ordinal)
+           && string.Equals(StateDatabase, other.StateDatabase, StringComparison.OrdinalIgnoreCase)
+           && string.Equals(HistoryDatabase, other.HistoryDatabase, StringComparison.OrdinalIgnoreCase)
+           && RolloutRepairs.SequenceEqual(other.RolloutRepairs)
+           && TurnOffsetRepairs.SequenceEqual(other.TurnOffsetRepairs)
+           && ProjectionOffsetRepairs.SequenceEqual(other.ProjectionOffsetRepairs);
 }
 
 internal sealed record PaginatedProviderScan(

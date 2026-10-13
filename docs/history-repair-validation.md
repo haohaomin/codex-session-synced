@@ -42,7 +42,7 @@ swift build -c release \
 
 用户数据的两条最小修复已在独立备份目录 `/Users/renhao/.codex/repair-backup-20261014-002135-two-repairs-final` 留存完整证据：neuink 的父分支偏移减少 50 字节；「明确项目上下游提问定位」切换到原始末端并排除两轮旧中断消息，官方分页结果为 35 轮、36 条用户消息和 110 条助手消息。数据库 `quick_check`、正文哈希、项目归属和 12 个偏移边界均已通过；原文件和旧记录均保留。
 
-当前工作区 v1.8.0 又增加了分页 Provider 自动修复的副本试写、首行 compare-and-swap、精确 50 字节回归和备份恢复测试，并统一了 Windows/macOS 的入口安全校验。它不会覆盖上述真实修复，也不会自动删除旧分支。
+当前工作区 v1.8.1 又增加了分页 Provider 自动修复的副本试写、首行 compare-and-swap、精确 50 字节回归和备份恢复测试，并统一了 Windows/macOS 的入口安全校验和 Desktop/CLI/app-server 写入进程保护。它不会覆盖上述真实修复，也不会自动删除旧分支。
 
 ## 仍需手工完成的客户端验收
 

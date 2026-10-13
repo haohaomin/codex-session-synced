@@ -295,7 +295,7 @@ public final class HistoryRepairService {
             guard process.terminationStatus == 0, let commands = String(data: data, encoding: .utf8) else { return true }
             return commands.split(separator: "\n").contains { command in
                 let name = (String(command).trimmingCharacters(in: .whitespaces) as NSString).lastPathComponent.lowercased()
-                return name == "codex" || name == "codex-cli"
+                return name == "codex" || name == "codex-cli" || name == "codex-app-server"
             }
         } catch { return true }
     }

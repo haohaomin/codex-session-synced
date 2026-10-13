@@ -8,6 +8,12 @@ Codex Synced 是一个 Windows / macOS 本地修复工具，用来解决 Codex D
 
 它不是云同步工具，也不会上传你的会话。所有扫描、备份、修复都发生在本机。
 
+## 1.8.1：统一写入进程保护补丁
+
+macOS 现在也会在写入前识别独立的 `codex-app-server` 进程，与 Windows 的退出检查保持一致；发现 Desktop、CLI 或 app-server 正在运行时始终拒绝写入，不会杀死进程。
+
+[1.8.1 发布说明](docs/release/v1.8.1.md) · [下载 Codex Synced 1.8.1](https://github.com/haohaomin/codex-session-synced/releases/tag/v1.8.1)
+
 ## 1.8.0：完成双平台统一设计
 
 1.8.0 补齐 1.7.0 发布后的跨平台一致性：Windows 持久化语言选择，检测 Desktop/CLI/app-server 写入进程；对话入口扫描要求唯一状态库、按目录阻断未知文件，并在 SQLite 副本验证入口写入后才提交；macOS 也增加同样的副本入口校验。
@@ -103,18 +109,18 @@ Codex Synced 是一个 Windows / macOS 本地修复工具，用来解决 Codex D
 
 ## Windows 下载与使用
 
-1. 前往 [GitHub Releases](https://github.com/haohaomin/codex-session-synced/releases/latest) 下载 `Codex-Synced-Windows-x64-1.8.0.msi`。
+1. 前往 [GitHub Releases](https://github.com/haohaomin/codex-session-synced/releases/latest) 下载 `Codex-Synced-Windows-x64-1.8.1.msi`。
 2. 退出 Codex。
 3. 双击 MSI 完成安装，然后从开始菜单打开 `Codex Synced`。
 4. 查看待修复项，选择备份模式，点击“备份并修复”。
 5. 分页 Provider 或后续消息不可见时，进入“对话修复”，先只读扫描，再逐条确认分页修复或入口修复。
 6. 重新打开并重启 Codex，检查历史会话正文、顺序、遗漏、重复和项目归属。
 
-Windows 版是完整桌面应用安装包，默认读取 `%USERPROFILE%\.codex`，并会自动识别当前活跃的状态库目录；也可以在设置中修改目录。Release 中也提供 `Codex-Synced-Windows-x64-1.8.0.zip`，用于不想安装时手动运行应用目录。
+Windows 版是完整桌面应用安装包，默认读取 `%USERPROFILE%\.codex`，并会自动识别当前活跃的状态库目录；也可以在设置中修改目录。Release 中也提供 `Codex-Synced-Windows-x64-1.8.1.zip`，用于不想安装时手动运行应用目录。
 
 ## macOS 下载与安装
 
-1. 前往 [GitHub Releases](https://github.com/haohaomin/codex-session-synced/releases/latest) 下载 `Codex-Synced-macOS-1.8.0.dmg`。
+1. 前往 [GitHub Releases](https://github.com/haohaomin/codex-session-synced/releases/latest) 下载 `Codex-Synced-macOS-1.8.1.dmg`。
 2. 双击打开 DMG。
 3. 将 `Codex Synced.app` 拖入 `Applications`。
 4. 第一次打开时，如果 macOS 提示来自未验证开发者，请在 Finder 中右键点击应用，选择“打开”，再确认打开。
@@ -130,7 +136,7 @@ Windows 版是完整桌面应用安装包，默认读取 `%USERPROFILE%\.codex`�
 2. 可选：校验下载文件的 SHA256，应与 Release 页面一致：
 
 ```bash
-   shasum -a 256 ~/Downloads/Codex-Synced-macOS-1.8.0.dmg
+   shasum -a 256 ~/Downloads/Codex-Synced-macOS-1.8.1.dmg
 ```
 
 3. 先尝试 Apple 推荐的方式：在 Finder 中进入 `Applications`，右键点击 `Codex Synced.app`，选择“打开”，再确认打开。

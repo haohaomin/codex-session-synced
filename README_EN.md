@@ -12,6 +12,12 @@ This release unifies provider-switch visibility repair, paginated-risk warnings,
 
 [1.7.0 release notes](docs/release/v1.7.0-en.md) · [Download Codex Synced 1.7.0](https://github.com/haohaomin/codex-session-synced/releases/tag/v1.7.0)
 
+## 1.8.1: Unified writer-protection patch
+
+macOS now also recognizes a standalone `codex-app-server` process before any write, matching Windows. Desktop, CLI, and app-server writers always fail closed; the tool never kills a process.
+
+[1.8.1 release notes](docs/release/v1.8.1-en.md) · [Download Codex Synced 1.8.1](https://github.com/haohaomin/codex-session-synced/releases/tag/v1.8.1)
+
 ## 1.8.0: Complete cross-platform design parity
 
 1.8.0 closes the remaining consistency gaps after 1.7.0: Windows persists the language choice, detects Desktop/CLI/app-server writers, requires an unambiguous auto-discovered state database for Chat Repair, scopes unknown-file blocking to the affected directory, and verifies the entrypoint on the SQLite trial copy before committing. macOS performs the same trial-entrypoint check.
@@ -92,18 +98,18 @@ Regression coverage was also added for database selection, archived threads, cor
 
 ## Windows Download and Usage
 
-1. Download `Codex-Synced-Windows-x64-1.8.0.msi` from the [latest GitHub Release](https://github.com/haohaomin/codex-session-synced/releases/latest).
+1. Download `Codex-Synced-Windows-x64-1.8.1.msi` from the [latest GitHub Release](https://github.com/haohaomin/codex-session-synced/releases/latest).
 2. Quit Codex.
 3. Install the MSI, then open `Codex Synced` from the Start menu.
 4. Review pending changes, choose a backup mode, then apply the repair.
 5. For paginated Provider cases or hidden follow-up messages, open **Chat Repair**, run a read-only scan, and confirm paginated or entrypoint repair one chat at a time.
 6. Reopen and restart Codex, then verify message content, order, omissions, duplicates, and project ownership.
 
-The Windows build is a full desktop app installer. It defaults to `%USERPROFILE%\.codex`, automatically detects the active state database directory, and the directory can be changed in settings. The Release also includes `Codex-Synced-Windows-x64-1.8.0.zip` for users who prefer a manually extracted app directory.
+The Windows build is a full desktop app installer. It defaults to `%USERPROFILE%\.codex`, automatically detects the active state database directory, and the directory can be changed in settings. The Release also includes `Codex-Synced-Windows-x64-1.8.1.zip` for users who prefer a manually extracted app directory.
 
 ## macOS Download and Install
 
-1. Download `Codex-Synced-macOS-1.8.0.dmg` from the [latest GitHub Release](https://github.com/haohaomin/codex-session-synced/releases/latest).
+1. Download `Codex-Synced-macOS-1.8.1.dmg` from the [latest GitHub Release](https://github.com/haohaomin/codex-session-synced/releases/latest).
 2. Open the DMG.
 3. Drag `Codex Synced.app` into `Applications`.
 4. On first launch, if macOS blocks the app, right-click it in Finder, choose `Open`, and confirm.

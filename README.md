@@ -91,7 +91,7 @@ Windows 版是完整桌面应用安装包，默认读取 `%USERPROFILE%\.codex`�
 
 ## macOS 下载与安装
 
-1. 前往 [GitHub Releases](https://github.com/renhao12356578/codex-session-synced/releases/latest) 下载 `Codex-Synced-macOS-1.5.0.dmg`。
+1. 前往 [GitHub Releases](https://github.com/haohaomin/codex-session-synced/releases/latest) 下载 `Codex-Synced-macOS-1.6.0.dmg`。
 2. 双击打开 DMG。
 3. 将 `Codex Synced.app` 拖入 `Applications`。
 4. 第一次打开时，如果 macOS 提示来自未验证开发者，请在 Finder 中右键点击应用，选择“打开”，再确认打开。
@@ -107,7 +107,7 @@ Windows 版是完整桌面应用安装包，默认读取 `%USERPROFILE%\.codex`�
 2. 可选：校验下载文件的 SHA256，应与 Release 页面一致：
 
 ```bash
-shasum -a 256 ~/Downloads/Codex-Synced-macOS-1.5.0.dmg
+   shasum -a 256 ~/Downloads/Codex-Synced-macOS-1.6.0.dmg
 ```
 
 3. 先尝试 Apple 推荐的方式：在 Finder 中进入 `Applications`，右键点击 `Codex Synced.app`，选择“打开”，再确认打开。

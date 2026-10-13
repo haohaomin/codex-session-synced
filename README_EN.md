@@ -80,7 +80,7 @@ The Windows build is a full desktop app installer. It defaults to `%USERPROFILE%
 
 ## macOS Download and Install
 
-1. Download `Codex-Synced-macOS-1.5.0.dmg` from the [latest GitHub Release](https://github.com/renhao12356578/codex-session-synced/releases/latest).
+1. Download `Codex-Synced-macOS-1.6.0.dmg` from the [latest GitHub Release](https://github.com/haohaomin/codex-session-synced/releases/latest).
 2. Open the DMG.
 3. Drag `Codex Synced.app` into `Applications`.
 4. On first launch, if macOS blocks the app, right-click it in Finder, choose `Open`, and confirm.

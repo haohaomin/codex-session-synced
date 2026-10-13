@@ -13,9 +13,9 @@ This release unifies provider-switch visibility repair, paginated-risk warnings,
 - **Scoped unknown-file blocking**: temporary, repair, and backup artifacts are ignored; an unrecognized rollout only blocks chats in its own directory.
 - **Unified risk UI**: the pending-repair and chat-repair pages now use the same status, risk, and verification-boundary cards.
 
-## Next stage: safe paginated Provider repair (v1.6.0 plan)
+## 1.6.0: safe paginated Provider repair
 
-The second-stage paginated repair path is now implemented behind an explicit confirmation flow and remains separate from the ordinary sidebar repair until release acceptance is complete. See the [implementation plan](docs/paginated-provider-repair-plan.md).
+The second-stage paginated repair path is now implemented behind an explicit confirmation flow and remains separate from the ordinary sidebar repair. See the [implementation plan](docs/paginated-provider-repair-plan.md).
 
 - Builds a global physical-branch index and fails closed on duplicate IDs, multiple history databases, missing parents, ambiguous tips, or unexplained boundaries.
 - Recalculates descendant `history_base.end_byte_offset`, `thread_turns` offsets, and the projection cursor from the actual first-line byte delta, without concatenating or rebuilding message bodies.
@@ -23,7 +23,7 @@ The second-stage paginated repair path is now implemented behind an explicit con
 - Uses compare-and-swap metadata checks, body hashes, and backup recovery; it never kills a running Codex process.
 - Shows paginated diagnostics directly in the UI and offers only fully validated repairs in the separate second-stage section.
 
-This is an implementation record, not a v1.6.0 release yet. Before publishing, the project still needs the full test suite, Release build, 50-byte mid-file offset, multi-database, rollback, and post-restart client-read acceptance.
+The full test suite and Release build pass. After applying a repair, reopen and restart Codex and manually compare message order, omissions, duplicates, and project ownership.
 
 ## 1.4.0: Chat Diagnosis & Entrypoint Repair (experimental, macOS)
 

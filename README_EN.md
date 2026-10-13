@@ -8,6 +8,8 @@ This release unifies provider-switch visibility repair, paginated-risk warnings,
 
 [1.5.0 release notes](docs/release/v1.5.0-en.md) · [Download 1.5.0](https://github.com/renhao12356578/codex-session-synced/releases/tag/v1.5.0)
 
+[1.6.0 release notes](docs/release/v1.6.0-en.md) · [Download macOS 1.6.0](https://github.com/haohaomin/codex-session-synced/releases/tag/v1.6.0)
+
 - **Layered provider safety**: legacy-format threads remain eligible for safe alignment; paginated Provider mismatches are shown separately and are not presented as body repairs.
 - **WAL-consistent backups**: lightweight backups retain live SQLite/WAL/SHM files and create SQLite Backup API snapshots for present `state_*`, `thread_history_*`, and `logs_*` databases.
 - **Scoped unknown-file blocking**: temporary, repair, and backup artifacts are ignored; an unrecognized rollout only blocks chats in its own directory.

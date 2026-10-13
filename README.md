@@ -14,6 +14,8 @@ Codex Synced 是一个 Windows / macOS 本地修复工具，用来解决 Codex D
 
 [1.5.0 发布说明](docs/release/v1.5.0.md) · [下载 1.5.0](https://github.com/renhao12356578/codex-session-synced/releases/tag/v1.5.0)
 
+[1.6.0 发布说明](docs/release/v1.6.0.md) · [下载 macOS 1.6.0](https://github.com/haohaomin/codex-session-synced/releases/tag/v1.6.0)
+
 - **Provider 风险分层**：普通格式会话继续支持安全对齐；分页 Provider 差异独立展示，不把 SQLite 元数据修复冒充为正文修复。
 - **WAL 一致备份**：轻量备份保留活动数据库的主文件、WAL/SHM，并额外写入 `SQLite Backup API` 一致快照；同时覆盖存在的 `state_*`、`thread_history_*` 和 `logs_*` 数据库。
 - **局部未知文件阻断**：临时文件、修复残留和备份副本会被忽略；无法识别的 rollout 只阻断同目录会话，不再让无关目录全部停摆。

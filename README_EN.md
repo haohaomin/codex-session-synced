@@ -1,5 +1,15 @@
 # Codex Synced
 
+## 1.9.0: Software update discovery
+
+[1.9.0 release notes](docs/release/v1.9.0-en.md) · [Download 1.9.0](https://github.com/haohaomin/codex-session-synced/releases/tag/v1.9.0)
+
+macOS and Windows now offer **Settings → Software Update**: manual checks, opt-in launch checks (off by default), installed/latest versions and plain-text release notes. Checks read only this repository's stable GitHub release metadata, validate numeric versions, release-page and platform-package URLs, and reject drafts, prereleases, incomplete assets or unexpected sources. No packages are downloaded. Automatic failures are quiet; manual failures show an error, never “up to date”.
+
+When an update is available, **Open Download Page** asks for confirmation before opening that version's release page. Download the macOS DMG, Windows x64 MSI or portable ZIP yourself. Finish repairs, quit Codex Synced normally and retain the old app and backups before installing. Extract portable ZIPs into a new directory, not over running files. Relaunch and verify the version and data.
+
+**This is not automatic installation.** Packages do not yet have independent updater signatures; SHA256SUMS are not signatures. The checker does not download/execute packages, kill processes or modify `.codex`, Provider configuration, databases or chats. Opening the page does not mean an update succeeded. Signed installation, replacement, restart handshakes and rollback remain future work. [Plan and acceptance boundaries](docs/software-update-plan.md).
+
 English | [中文](README.md)
 
 ## 1.5.0: Provider-Switch Diagnostics & Safe Backups

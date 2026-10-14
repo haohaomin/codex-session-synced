@@ -70,6 +70,7 @@ internal sealed class AppSettings
     public int FullLimit { get; set; } = 3;
     public bool OpenCodexAfterRepair { get; set; } = true;
     public bool AlignProvidersForVisibility { get; set; } = true;
+    public bool CheckForUpdatesOnLaunch { get; set; }
 
     public static string SettingsPath =>
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Codex Synced", "settings.json");

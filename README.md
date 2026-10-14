@@ -1,5 +1,15 @@
 # Codex Synced
 
+## 1.9.0：应用更新入口
+
+[1.9.0 发布说明](docs/release/v1.9.0.md) · [下载 1.9.0](https://github.com/haohaomin/codex-session-synced/releases/tag/v1.9.0)
+
+macOS / Windows 的「设置 → 应用更新」新增手动检查、默认关闭的启动检查、当前/最新版本和发布说明。固定检查本仓库的 GitHub 稳定发布；验证数字版本、发布页、平台资产和下载地址，拒绝草稿、预发布、缺包或异常来源。检查不下载安装包，自动检查失败不弹窗；手动检查失败会显示原因，不会误报“已是最新”。
+
+有更新时点击「打开下载页面」，确认后进入对应版本的发布页，手动选择 macOS DMG、Windows x64 MSI 或便携 ZIP。安装前完成修复并正常退出 Codex Synced，保留旧应用和备份；便携 ZIP 解压到新目录，不覆盖运行中的文件。安装后重启并核对版本与数据。
+
+**目前不是一键自动安装**：发布包尚无独立更新签名，SHA256SUMS 不等于签名。本功能不下载/执行安装包、不终止进程、不改写 `.codex`、Provider 配置、数据库或会话文件。打开下载页不代表更新完成。签名、应用替换、重启握手与自动回滚属于后续阶段。[完整方案与验收边界](docs/software-update-plan.md)。
+
 [English](README_EN.md) | 中文
 
 Codex Synced 是一个 Windows / macOS 本地修复工具，用来解决 Codex Desktop 侧边栏会话历史不可见、标题显示为“新对话”、时间排序异常等本地状态问题。

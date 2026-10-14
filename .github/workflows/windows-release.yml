@@ -26,6 +26,9 @@ jobs:
       - name: Run isolated self-test
         run: dotnet run --project Windows/CodexSynced.Windows/CodexSynced.Windows.csproj -c Release -- --self-test
 
+      - name: Test update discovery without network or user data
+        run: dotnet run --project Windows/UpdateTests/UpdateTests.csproj -c Release
+
       - name: Publish Windows app directory
         run: >
           dotnet publish Windows/CodexSynced.Windows/CodexSynced.Windows.csproj

@@ -50,6 +50,7 @@ final class AppViewModel: ObservableObject {
     @Published var historyMessage: String?
 
     let service = CodexRepairService()
+    let updater = SoftwareUpdateModel()
     private var dismissNoticeTask: Task<Void, Never>?
 
     init() {
@@ -58,6 +59,7 @@ final class AppViewModel: ObservableObject {
         l10n = L10n(language: loadedSettings.language)
         selectedBackupMode = loadedSettings.defaultBackupMode
         Task { await scan(showFeedback: false) }
+        if updater.checkOnLaunch { Task { await updater.check(manual: false) } }
     }
 
     func scan(showFeedback: Bool = true) async {

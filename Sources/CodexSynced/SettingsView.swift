@@ -83,6 +83,7 @@ struct SettingsView: View {
                         .animation(AppMotion.smooth, value: viewModel.settings.openCodexAfterRepair)
                     }
                 }
+                SoftwareUpdateView(updater: viewModel.updater)
             }
             .padding(28)
         }

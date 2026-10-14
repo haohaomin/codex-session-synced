@@ -61,6 +61,11 @@ internal sealed class MainWindow : Window
     private string _busyTitle = "";
     private string _busyDetail = "";
     private double _busyProgress;
+    private bool _checkingUpdate;
+    private bool _startupUpdateChecked;
+    private SoftwareUpdate? _updateCandidate;
+    private string? _updateError;
+    private DateTime? _updateCheckedAt;
 
     public MainWindow()
     {
@@ -91,6 +96,12 @@ internal sealed class MainWindow : Window
         Show(BuildHome(), false);
         ContentRendered += (_, _) => { if (_host.Children.Count == 0) Show(CurrentView(), false); };
         Loaded += async (_, _) => await ScanAsync();
+        Loaded += async (_, _) =>
+        {
+            if (_startupUpdateChecked) return;
+            _startupUpdateChecked = true;
+            if (_settings.CheckForUpdatesOnLaunch) await CheckForUpdatesAsync(manual: false);
+        };
     }
 
     public void SaveSnapshot(string outputPath, string? codexHome)
@@ -512,7 +523,86 @@ internal sealed class MainWindow : Window
         s.Children.Add(Divider());
         s.Children.Add(ToggleRow());
         s.Children.Add(Button(T("保存设置", "Save Settings"), true, SaveSettings));
-        return Page(T("设置", "Settings"), T("保留最少必要配置，避免把工具做成数据库管理器。", "Only the necessary settings for this repair tool."), Panel(s));
+        return Page(T("设置", "Settings"), T("保留最少必要配置，避免把工具做成数据库管理器。", "Only the necessary settings for this repair tool."), Panel(s), BuildSoftwareUpdate());
+    }
+
+    private UIElement BuildSoftwareUpdate()
+    {
+        var panel = new StackPanel();
+        panel.Children.Add(Text(T("应用更新", "Software Update"), 16, FontWeights.SemiBold, Ink));
+        panel.Children.Add(Text(T($"当前版本：{AppVersion}", $"Current version: {AppVersion}"), 13, FontWeights.Normal, Ink));
+        panel.Children.Add(TwoCol(UpdateText(T("启动时检查更新（不下载）", "Check on launch (no download)"), Ink),
+            Toggle(_settings.CheckForUpdatesOnLaunch, value =>
+            {
+                var previous = _settings.CheckForUpdatesOnLaunch;
+                try { _settings.CheckForUpdatesOnLaunch = value; _settings.Save(); }
+                catch (Exception ex) { _settings.CheckForUpdatesOnLaunch = previous; _updateError = ex.Message; }
+                TryShowCurrent(false);
+            })));
+        panel.Children.Add(Text(T("来源：haohaomin/codex-session-synced · GitHub 稳定发布", "Source: haohaomin/codex-session-synced · GitHub stable releases"), 12, FontWeights.Normal, Muted));
+        panel.Children.Add(Button(T(_checkingUpdate ? "正在检查…" : "检查更新", _checkingUpdate ? "Checking…" : "Check for Updates"), false,
+            async () => await CheckForUpdatesAsync(manual: true), _checkingUpdate));
+        if (_updateCandidate is { } candidate)
+        {
+            panel.Children.Add(Text(T($"发现新版本：{candidate.Version}", $"New version: {candidate.Version}"), 14, FontWeights.SemiBold, Blue));
+            if (candidate.Notes.Length > 0)
+                panel.Children.Add(new ScrollViewer { MaxHeight = 180, VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                    Content = UpdateText(candidate.Notes, Ink) });
+            panel.Children.Add(Button(T("打开下载页面", "Open Download Page"), false, OpenUpdatePage, _busy));
+        }
+        else if (_updateCheckedAt is not null)
+            panel.Children.Add(Text(T("没有更新的稳定版本。", "No newer stable release is available."), 13, FontWeights.Normal, Ink));
+        if (_updateCheckedAt is { } date)
+            panel.Children.Add(Text(T($"检查时间：{date:g}", $"Checked: {date:g}"), 12, FontWeights.Normal, Muted));
+        if (_updateError is not null)
+            panel.Children.Add(UpdateText(T("更新检查或设置失败：", "Update check or settings failed: ") + _updateError, Warn));
+        panel.Children.Add(UpdateText(T("当前仅检查版本并打开下载页，不自动安装。发布包尚无独立更新签名；请手动安装，并保留旧应用与备份。不会修改 Codex 对话或配置。", "Checks versions and opens the download page only; no automatic installation. Packages do not yet have independent updater signatures. Install manually and keep the old app and backups. Codex chats and configuration are not modified."), Muted));
+        return Panel(panel);
+    }
+
+    private static TextBlock UpdateText(string value, WpfBrush color)
+    {
+        var text = Text(value, 12, FontWeights.Normal, color);
+        text.TextWrapping = TextWrapping.Wrap;
+        text.TextTrimming = TextTrimming.None;
+        text.Margin = new Thickness(0, 8, 0, 8);
+        return text;
+    }
+
+    private async Task CheckForUpdatesAsync(bool manual)
+    {
+        if (_checkingUpdate) return;
+        _checkingUpdate = true;
+        _updateCandidate = null;
+        _updateError = null;
+        _updateCheckedAt = null;
+        if (_section == UiSection.Settings) TryShowCurrent(false);
+        try
+        {
+            _updateCandidate = await SoftwareUpdateService.CheckAsync(AppVersion);
+            _updateCheckedAt = DateTime.Now;
+        }
+        catch (Exception ex)
+        {
+            // Startup checks never interrupt a repair with an alert.
+            if (manual) _updateError = ex.Message;
+            else System.Diagnostics.Trace.TraceWarning("Software update check failed: {0}", ex.Message);
+        }
+        finally
+        {
+            _checkingUpdate = false;
+            if (_section == UiSection.Settings) TryShowCurrent(false);
+        }
+    }
+
+    private void OpenUpdatePage()
+    {
+        if (_busy || _updateCandidate is not { } candidate) return;
+        if (System.Windows.MessageBox.Show(this,
+            T("将打开此版本的发布页。MSI 安装用户选择 x64 MSI，便携版用户选择 ZIP 并解压到新目录，不要覆盖正在运行的文件。请先完成修复，正常退出 Codex Synced，并保留旧应用和备份。打开页面不代表安装成功；重启后检查版本。", "Open this version's release page. MSI users: choose x64 MSI. Portable users: extract ZIP into a new directory, never over running files. Finish repairs, quit Codex Synced normally and keep the old app and backups. Opening the page does not mean installation succeeded; verify the version after relaunch."),
+            T("手动更新 Codex Synced", "Update Codex Synced Manually"), MessageBoxButton.OKCancel, MessageBoxImage.Information) != MessageBoxResult.OK) return;
+        try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(candidate.PageUrl.AbsoluteUri) { UseShellExecute = true }); }
+        catch (Exception ex) { _updateError = ex.Message; TryShowCurrent(false); }
     }
 
     private async Task ScanAsync()

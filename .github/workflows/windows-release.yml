@@ -29,6 +29,9 @@ jobs:
       - name: Test update discovery without network or user data
         run: dotnet run --project Windows/UpdateTests/UpdateTests.csproj -c Release
 
+      - name: Test recoverable backup deletion on isolated fixtures
+        run: dotnet run --project Windows/BackupTests/BackupTests.csproj -c Release
+
       - name: Publish Windows app directory
         run: >
           dotnet publish Windows/CodexSynced.Windows/CodexSynced.Windows.csproj

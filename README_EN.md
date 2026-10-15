@@ -1,5 +1,15 @@
 # Codex Synced
 
+## 1.10.0: Chat-page feedback and recoverable backup deletion
+
+[1.10.0 release notes](docs/release/v1.10.0-en.md) · [Download 1.10.0](https://github.com/haohaomin/codex-session-synced/releases/tag/v1.10.0)
+
+Chat Repair now lists state-database candidates and supports explicit file selection for that page only. Automatic mode still rejects ambiguity; it never guesses by modification time or asks users to delete old databases. Scans report progress, failure or completion, and missing repair-record folders produce visible feedback. Records and backup inventory load independently of scan success.
+
+The Backups page lists ordinary and chat-repair backups with per-item deletion confirmation and refresh. Deletion validates the direct-child location, manifest and stale selection, rejects links and never touches live chats or databases. macOS uses Trash; Windows moves files into `codex-synced-deleted-backups` under Codex Home without relying on Recycle Bin availability. Put the folder back at its original path/name and refresh to recover it. Restore/rollback is unavailable while its backup is removed. There is no permanent-deletion fallback.
+
+No real user backups were deleted during development. [Implementation and validation](docs/chat-page-backup-management.md).
+
 ## 1.9.0: Software update discovery
 
 [1.9.0 release notes](docs/release/v1.9.0-en.md) · [Download 1.9.0](https://github.com/haohaomin/codex-session-synced/releases/tag/v1.9.0)

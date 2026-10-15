@@ -4,6 +4,66 @@ import Testing
 @testable import CodexSyncedCore
 
 struct HistoryRepairTests {
+    @Test func explicitDatabaseSelectionResolvesAmbiguityAndPreservesOtherDatabase() throws {
+        let f = try Fixture()
+        defer { f.clean() }
+        let nested = f.home.appendingPathComponent("sqlite")
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        let other = nested.appendingPathComponent("state_5.sqlite")
+        try SQLiteDatabase(path: f.db.path, readonly: true).backup(to: other)
+        let before = try Data(contentsOf: other)
+        var settings = f.settings
+        settings.sqliteHome = nil
+        #expect(try f.service.databaseCandidates(settings: settings).count == 2)
+        #expect(throws: HistoryRepairError.self) { try f.service.scan(settings: settings) }
+        settings.historyDatabase = f.db
+        let scan = try f.service.scan(settings: settings)
+        #expect(scan.database == f.db)
+        let record = try f.service.repair(#require(scan.diagnoses.first), scan: scan, settings: settings)
+        #expect(try Data(contentsOf: other) == before)
+        settings.historyDatabase = other
+        #expect(throws: HistoryRepairError.self) { try f.service.rollback(record, settings: settings) }
+        settings.historyDatabase = f.db
+        try f.service.rollback(record, settings: settings)
+        #expect(try Data(contentsOf: other) == before)
+    }
+
+    @Test func explicitSelectionRejectsMissingOutsideAndSymlinkDatabases() throws {
+        let f = try Fixture()
+        defer { f.clean() }
+        var settings = f.settings
+        for selected in [f.home.appendingPathComponent("state_missing.sqlite"), f.home.deletingLastPathComponent().appendingPathComponent("state_5.sqlite")] {
+            settings.historyDatabase = selected
+            #expect(throws: HistoryRepairError.self) { try f.service.scan(settings: settings) }
+        }
+        let linked = f.home.appendingPathComponent("state_link.sqlite")
+        try FileManager.default.createSymbolicLink(at: linked, withDestinationURL: f.db)
+        settings.historyDatabase = linked
+        #expect(throws: HistoryRepairError.self) { try f.service.scan(settings: settings) }
+    }
+
+    @Test func historyBackupsCanBeListedAndTrashedWithoutScanningAnAmbiguousDatabase() throws {
+        let f = try Fixture()
+        defer { f.clean() }
+        let (scan, item) = try f.preview()
+        let record = try f.service.repair(item, scan: scan, settings: f.settings)
+        let bytes = try Data(contentsOf: f.child)
+        let rows = try f.rows()
+        try Data().write(to: f.home.appendingPathComponent("state_6.sqlite"))
+        #expect(throws: HistoryRepairError.self) { try f.service.scan(settings: f.settings) }
+        let moved = f.home.appendingPathComponent("test-trash")
+        let manager = BackupManagementService(trashItem: { try FileManager.default.moveItem(at: $0, to: moved) })
+        let inventory = manager.inventory(codexHome: f.home)
+        let backup = try #require(inventory.items.first)
+        #expect(backup.historyRecord == record)
+        try manager.delete(backup, codexHome: f.home)
+        #expect(manager.inventory(codexHome: f.home).items.isEmpty)
+        #expect(try f.rows() == rows)
+        #expect(try Data(contentsOf: f.child) == bytes)
+        try FileManager.default.moveItem(at: moved, to: URL(fileURLWithPath: record.directory))
+        #expect(manager.inventory(codexHome: f.home).items.count == 1)
+    }
+
     @Test func scanIsReadOnlyAndExcludesSupersededMessages() throws {
         let f = try Fixture()
         defer { f.clean() }

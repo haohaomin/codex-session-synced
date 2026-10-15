@@ -53,6 +53,8 @@ public struct AppSettings: Sendable {
     public var fullLimit: Int
     public var openCodexAfterRepair: Bool
     public var alignProvidersForVisibility: Bool
+    /// Explicit selection for chat repair only; never changes the provider repair database.
+    public var historyDatabase: URL? = nil
 
     public init(language: Language, codexHome: URL, sqliteHome: URL?, defaultBackupMode: BackupMode, lightweightLimit: Int, fullLimit: Int, openCodexAfterRepair: Bool, alignProvidersForVisibility: Bool = true) {
         self.language = language
@@ -77,7 +79,7 @@ public struct AppSettings: Sendable {
         let language = Language(rawValue: defaults.string(forKey: "language") ?? "zh") ?? .zh
         let backupMode = BackupMode(rawValue: defaults.string(forKey: "defaultBackupMode") ?? "lightweight") ?? .lightweight
 
-        return AppSettings(
+        var settings = AppSettings(
             language: language,
             codexHome: URL(fileURLWithPath: codexHomePath).standardizedFileURL,
             sqliteHome: sqliteHomePath.map { URL(fileURLWithPath: $0).standardizedFileURL },
@@ -87,6 +89,8 @@ public struct AppSettings: Sendable {
             openCodexAfterRepair: defaults.object(forKey: "openCodexAfterRepair") as? Bool ?? true,
             alignProvidersForVisibility: defaults.object(forKey: "alignProvidersForVisibility") as? Bool ?? true
         )
+        settings.historyDatabase = defaults.string(forKey: "historyDatabase").map { URL(fileURLWithPath: $0) }
+        return settings
     }
 
     public func save() {
@@ -99,6 +103,7 @@ public struct AppSettings: Sendable {
         defaults.set(fullLimit, forKey: "fullLimit")
         defaults.set(openCodexAfterRepair, forKey: "openCodexAfterRepair")
         defaults.set(alignProvidersForVisibility, forKey: "alignProvidersForVisibility")
+        defaults.set(historyDatabase?.path, forKey: "historyDatabase")
     }
 }
 

@@ -11,7 +11,7 @@
     <RootNamespace>CodexSynced.Windows</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>Resources\AppIcon.ico</ApplicationIcon>
-    <Version>1.9.0</Version>
+    <Version>1.10.0</Version>
     <Authors>saymyzj</Authors>
     <Description>Repair local Codex Desktop sidebar history summaries.</Description>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>

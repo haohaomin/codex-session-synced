@@ -26,11 +26,17 @@ struct OperationProgress: Equatable {
 final class AppViewModel: ObservableObject {
     @Published var settings: AppSettings {
         didSet {
+            if oldValue.codexHome != settings.codexHome || oldValue.sqliteHome != settings.sqliteHome {
+                settings.historyDatabase = nil
+                historyDatabases = []
+                managedBackups = []
+            }
             settings.save()
             l10n = L10n(language: settings.language)
-            if oldValue.codexHome != settings.codexHome || oldValue.sqliteHome != settings.sqliteHome {
+            if oldValue.codexHome != settings.codexHome || oldValue.sqliteHome != settings.sqliteHome || oldValue.historyDatabase != settings.historyDatabase {
                 historyScan = nil
                 historyRecords = []
+                historyMessage = nil
             }
         }
     }
@@ -48,6 +54,11 @@ final class AppViewModel: ObservableObject {
     @Published var historyScan: HistoryScan?
     @Published var historyRecords: [HistoryRepairRecord] = []
     @Published var historyMessage: String?
+    @Published var historyDatabases: [URL] = []
+    @Published var isHistoryScanning = false
+    @Published var managedBackups: [ManagedBackup] = []
+    @Published var backupWarnings: [String] = []
+    @Published var loadingBackups = false
 
     let service = CodexRepairService()
     let updater = SoftwareUpdateModel()
@@ -291,8 +302,70 @@ final class AppViewModel: ObservableObject {
 
     func openBackupDirectory() {
         let root = service.backupRoot(codexHome: settings.codexHome)
-        service.openDirectory(root)
-        showNotice(title: l10n.text("已打开备份目录", "Backup Folder Opened"), message: root.path, tone: .info)
+        openExistingDirectory(root)
+    }
+
+    func openHistoryRecords() {
+        openExistingDirectory(HistoryRepairService().backupRoot(settings: settings), history: true)
+    }
+
+    private func openExistingDirectory(_ root: URL, history: Bool = false) {
+        var isDirectory: ObjCBool = false
+        let message: String
+        let opened: Bool
+        if !FileManager.default.fileExists(atPath: root.path, isDirectory: &isDirectory) || !isDirectory.boolValue {
+            message = l10n.text("目录尚不存在：只有完成相应备份或修复后才会创建。", "This folder does not exist yet; it is created when a backup or repair is performed.") + "\n" + root.path
+            opened = false
+        } else {
+            opened = NSWorkspace.shared.open(root)
+            message = opened ? root.path : l10n.text("系统未能打开目录，请检查访问权限。", "The system could not open this folder. Check access permissions.") + "\n" + root.path
+        }
+        if history { historyMessage = message }
+        showNotice(title: l10n.text(opened ? "目录已打开" : "未打开目录", opened ? "Folder Opened" : "Folder Not Opened"), message: message, tone: opened ? .info : .warning)
+    }
+
+    func refreshHistoryContext() {
+        historyDatabases = []
+        historyRecords = []
+        do { historyDatabases = try HistoryRepairService().databaseCandidates(settings: settings) }
+        catch { historyMessage = error.localizedDescription }
+        // Repair records remain accessible even when database selection or scanning fails.
+        do { historyRecords = try HistoryRepairService().records(settings: settings) }
+        catch { historyMessage = error.localizedDescription }
+    }
+
+    func refreshBackups() async {
+        guard !loadingBackups else { return }
+        loadingBackups = true
+        defer { loadingBackups = false }
+        let home = settings.codexHome
+        let inventory = await Task.detached(priority: .userInitiated) {
+            BackupManagementService().inventory(codexHome: home)
+        }.value
+        guard home == settings.codexHome else { return }
+        managedBackups = inventory.items
+        backupWarnings = inventory.warnings
+    }
+
+    func deleteBackup(_ backup: ManagedBackup) async {
+        guard !isBusy else { return }
+        status = .repairing(l10n.text("移到废纸篓", "Moving to Trash"))
+        let home = settings.codexHome
+        do {
+            try await Task.detached(priority: .userInitiated) {
+                try BackupManagementService().delete(backup, codexHome: home)
+            }.value
+            scanResult?.backups.removeAll { $0.path == backup.directory.path }
+            historyRecords.removeAll { $0.directory == backup.directory.path }
+            selectedBackupForRestore = nil
+            status = .ready
+            await refreshBackups()
+            showNotice(title: l10n.text("备份已移到废纸篓", "Backup Moved to Trash"),
+                message: l10n.text("未改动当前对话。需要时可在 Finder 废纸篓中放回原目录，再刷新列表。", "Live chats were not changed. Put the backup back from Finder's Trash and refresh to recover it."), tone: .success)
+        } catch {
+            status = .failed(error.localizedDescription)
+            showNotice(title: l10n.text("删除失败", "Deletion Failed"), message: error.localizedDescription, tone: .warning, autoDismiss: false)
+        }
     }
 
     var pendingRepairCount: Int {
@@ -325,23 +398,27 @@ final class AppViewModel: ObservableObject {
     func scanHistory() async {
         guard !isBusy else { return }
         status = .scanning
+        isHistoryScanning = true
+        defer { isHistoryScanning = false }
         historyScan = nil
         historyMessage = nil
+        refreshHistoryContext()
         let captured = settings
         do {
-            let (result, records) = try await Task.detached(priority: .userInitiated) {
-                let service = HistoryRepairService()
-                return (try service.scan(settings: captured), try service.records(settings: captured))
+            let result = try await Task.detached(priority: .userInitiated) {
+                try HistoryRepairService().scan(settings: captured)
             }.value
-            guard captured.codexHome == settings.codexHome, captured.sqliteHome == settings.sqliteHome else {
+            guard captured.codexHome == settings.codexHome, captured.sqliteHome == settings.sqliteHome,
+                  captured.historyDatabase == settings.historyDatabase else {
                 throw HistoryRepairError.stale
             }
             historyScan = result
-            historyRecords = records
             status = .ready
+            historyMessage = l10n.text("扫描完成：检查了 \(result.diagnoses.count) 个分页对话，\(result.diagnoses.filter(\.canRepair).count) 个入口可修复。", "Scan complete: \(result.diagnoses.count) paginated chats checked; \(result.diagnoses.filter(\.canRepair).count) entrypoints can be repaired.")
         } catch {
             status = .failed(error.localizedDescription)
             historyMessage = error.localizedDescription
+            showNotice(title: l10n.text("对话扫描未完成", "Chat Scan Incomplete"), message: error.localizedDescription, tone: .warning)
         }
     }
 

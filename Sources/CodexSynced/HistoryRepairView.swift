@@ -25,13 +25,29 @@ struct HistoryRepairView: View {
                             message: t("文件哈希、序号和字节边界通过，只代表入口修复安全；重新打开对话并重启 Codex 后，仍需人工核对正文顺序、遗漏、重复和项目归属。", "Passing file hashes, ordinals and byte boundaries proves the entrypoint change is safe; reopen the chat and restart Codex to verify message order, omissions, duplicates and project ownership." )
                         )
                         HStack {
-                            Button(t("只读扫描", "Read-only Scan")) { Task { await model.scanHistory() } }
+                            Button(t(model.isHistoryScanning ? "正在扫描…" : "只读扫描", model.isHistoryScanning ? "Scanning…" : "Read-only Scan")) { Task { await model.scanHistory() } }
                                 .buttonStyle(.borderedProminent).disabled(model.isBusy)
                             if model.isBusy { ProgressView().controlSize(.small) }
                             Button(t("打开修复记录", "Open Repair Records")) {
-                                model.service.openDirectory(HistoryRepairService().backupRoot(settings: model.settings))
+                                model.openHistoryRecords()
                             }
+                            Button(t("刷新状态库列表", "Refresh Databases")) { model.refreshHistoryContext() }.disabled(model.isBusy)
                         }
+                        if model.isBusy {
+                            Text(t(model.isHistoryScanning ? "正在只读检查分支链，请稍候。" : "其他扫描或操作正在进行，完成后可扫描对话。", model.isHistoryScanning ? "Reading branch chains. Please wait." : "Another scan or operation is running. Wait before starting a chat scan.")).font(.caption)
+                        }
+                        Text(t("诊断状态库（仅用于本页）", "State database (this page only)")).font(.subheadline.bold())
+                        Picker(t("状态库", "Database"), selection: $model.settings.historyDatabase) {
+                            Text(t("自动（仅有一个状态库时）", "Automatic (only if unambiguous)")).tag(nil as URL?)
+                            ForEach(model.historyDatabases, id: \.self) { url in
+                                Text(url.path).tag(url as URL?)
+                            }
+                            if let selected = model.settings.historyDatabase, !model.historyDatabases.contains(selected) {
+                                Text(t("已失效：", "Unavailable: ") + selected.path).tag(selected as URL?)
+                            }
+                        }.disabled(model.isBusy)
+                        Text(t("发现多个状态库时，请明确选择要诊断的文件；不会按修改时间猜测，也不需要移动或删除数据库。其他目录可在设置中选择 SQLite Home。", "When multiple databases exist, select the file to diagnose. No timestamp guessing, moving or deleting databases. For another directory, set SQLite Home in Settings."))
+                            .font(.caption).foregroundStyle(DS.muted)
                         if let message = model.historyMessage { Text(message).textSelection(.enabled) }
                     }
                 }
@@ -63,6 +79,7 @@ struct HistoryRepairView: View {
                 }
             }.padding(28)
         }
+        .task { model.refreshHistoryContext() }
         .sheet(item: $selected) { item in
             VStack(alignment: .leading, spacing: 16) {
                 Text(t("确认最小修复", "Confirm Minimal Repair")).font(.title2)

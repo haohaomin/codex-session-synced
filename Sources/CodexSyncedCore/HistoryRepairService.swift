@@ -63,7 +63,7 @@ public struct HistoryRepairRecord: Codable, Identifiable, Sendable {
     public let newPath: String
 }
 
-private struct HistoryManifest: Codable {
+struct HistoryManifest: Codable {
     var version = 1
     var record: HistoryRepairRecord
     var database: String
@@ -111,21 +111,41 @@ public final class HistoryRepairService {
     // Injectable only inside this module (tests); the public write path always checks Codex.
     init(isRunning: @escaping () -> Bool) { self.isRunning = isRunning }
 
-    public func scan(settings: AppSettings) throws -> HistoryScan {
+    public func databaseCandidates(settings: AppSettings) throws -> [URL] {
         let home = CodexPathResolver.effectiveCodexHome(settings: settings)
         let config = ConfigParser.parse(url: home.appendingPathComponent("config.toml"))
         let sqlite = CodexPathResolver.effectiveSQLiteHome(settings: settings, parsedConfig: config)
         let automatic = settings.sqliteHome == nil && (config.rootValues["sqlite_home"] ?? "").isEmpty
         let directories = automatic ? [home, home.appendingPathComponent("sqlite")] : [sqlite]
-        let databases = try directories.flatMap { directory -> [URL] in
+        return try directories.flatMap { directory -> [URL] in
             guard FileManager.default.fileExists(atPath: directory.path) else { return [] }
             return try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
                 .filter { $0.lastPathComponent.hasPrefix("state_") && $0.pathExtension == "sqlite" }
-        }
+        }.map(\.standardizedFileURL).sorted { $0.path < $1.path }
+    }
+
+    public func scan(settings: AppSettings) throws -> HistoryScan {
+        let home = CodexPathResolver.effectiveCodexHome(settings: settings)
+        let databases = try databaseCandidates(settings: settings)
         // An ambiguous active database is not safe to mutate based on mtime alone.
-        guard databases.count == 1, let database = databases.first else {
-            throw HistoryRepairError.unsafe("需明确选择仅包含一个 state_*.sqlite 的 SQLite 目录。Select a SQLite directory containing exactly one state database.")
+        let database: URL
+        if let selected = settings.historyDatabase?.standardizedFileURL {
+            guard databases.contains(selected) else {
+                throw HistoryRepairError.unsafe("选中的状态库不在当前目录中，请重新选择。Selected database is no longer in the configured directories; select it again.")
+            }
+            database = selected
+        } else {
+            guard databases.count == 1, let only = databases.first else {
+                throw HistoryRepairError.unsafe(databases.isEmpty
+                    ? "未找到状态库，请在设置中检查 Codex Home / SQLite Home。No state database found; check the configured directories."
+                    : "发现多个状态库，请在本页选择需要诊断的文件后再扫描。Multiple state databases found; select a file on this page before scanning.")
+            }
+            database = only
         }
+        let attributes = try FileManager.default.attributesOfItem(atPath: database.path)
+        guard attributes[.type] as? FileAttributeType == .typeRegular,
+              (try database.deletingLastPathComponent().resourceValues(forKeys: [.isSymbolicLinkKey])).isSymbolicLink != true
+        else { throw HistoryRepairError.unsafe("状态库不能是符号链接。State database cannot be a symbolic link.") }
         let rows = try SQLiteDatabase(path: database.path, readonly: true).entrypointRows()
         let roots = [home.appendingPathComponent("sessions"), home.appendingPathComponent("archived_sessions")]
         var nodes: [String: [HistoryNode]] = [:]

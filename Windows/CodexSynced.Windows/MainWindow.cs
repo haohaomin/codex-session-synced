@@ -66,6 +66,11 @@ internal sealed class MainWindow : Window
     private SoftwareUpdate? _updateCandidate;
     private string? _updateError;
     private DateTime? _updateCheckedAt;
+    private string? _historyMessage;
+    private bool _historyScanning;
+    private List<ManagedBackup> _managedBackups = [];
+    private List<string> _backupWarnings = [];
+    private bool _loadingBackups;
 
     public MainWindow()
     {
@@ -180,6 +185,7 @@ internal sealed class MainWindow : Window
             _section = section;
             UpdateNav();
             Show(CurrentView(), true);
+            if (section == UiSection.Backups) _ = RefreshBackupsAsync();
         });
         b.Tag = section;
         b.Height = 42;
@@ -396,11 +402,32 @@ internal sealed class MainWindow : Window
 
     private UIElement BuildHistory()
     {
+        var databases = new List<string>();
+        try { databases = _historyService.DatabaseCandidates(SnapshotSettings()); }
+        catch (Exception ex) { _historyMessage = ex.Message; }
+        try { _historyRecords = _historyService.Records(SnapshotSettings()); }
+        catch (Exception ex) { _historyMessage = ex.Message; }
+        var selector = new System.Windows.Controls.ComboBox { MinWidth = 260, MaxWidth = 640, IsEnabled = !_busy };
+        selector.Items.Add(T("自动（仅有一个状态库时）", "Automatic (only if unambiguous)"));
+        foreach (var path in databases) selector.Items.Add(path);
+        if (_settings.HistoryDatabase is { } selectedDatabase && !databases.Contains(selectedDatabase)) selector.Items.Add(selectedDatabase);
+        selector.SelectedIndex = _settings.HistoryDatabase is null ? 0 : selector.Items.IndexOf(_settings.HistoryDatabase);
+        selector.SelectionChanged += (_, _) =>
+        {
+            _settings.HistoryDatabase = selector.SelectedIndex <= 0 ? null : selector.SelectedItem as string;
+            _historyScan = null;
+            _historyMessage = null;
+            try { _settings.Save(); } catch (Exception ex) { _historyMessage = ex.Message; }
+            TryShowCurrent(false);
+        };
         var content = new List<UIElement>
         {
             Panel(TextBlockPair(T("只改读取入口，不拼接正文", "Repair the entrypoint, never concatenate messages"), T("扫描只读。入口修复或撤销前必须退出 Codex；多个末端、缺失父分支、序号或字节边界不一致会停在人工确认。", "Scanning is read-only. Quit Codex before repair or rollback; ambiguous tips, missing parents, ordinal gaps, and byte-boundary mismatches require manual review."))),
-            Panel(Row(Button(T("只读扫描", "Read-only Scan"), false, ScanHistoryAsync), Button(T("打开修复记录", "Open Repair Records"), false, () => RepairService.OpenDirectory(Path.Combine(_settings.CodexHome, "history-entrypoint-backups")))))
+            Panel(Row(Button(T(_historyScanning ? "正在扫描…" : "只读扫描", _historyScanning ? "Scanning…" : "Read-only Scan"), false, ScanHistoryAsync, _busy), Button(T("打开修复记录", "Open Repair Records"), false, () => OpenExistingBackupFolder(Path.Combine(_settings.CodexHome, "history-entrypoint-backups"))), Button(T("刷新状态库列表", "Refresh Databases"), false, () => TryShowCurrent(false), _busy))),
+            Panel(Row(UpdateText(T("诊断状态库（仅用于本页）；多个文件时明确选择，不猜测、不移动数据库。其他目录可在设置中选择 SQLite Home。", "Database for this page only: select a file when ambiguous; no guessing or moving databases. For other directories, set SQLite Home in Settings."), Muted), selector))
         };
+        if (_busy) content.Add(Panel(BusyProgress(Blue)));
+        if (_historyMessage is not null) content.Add(Panel(UpdateText(_historyMessage, Warn)));
         if (_historyScan is null)
         {
             content.Add(Panel(Empty("⌁", T("尚未扫描对话入口", "Chat entrypoints have not been scanned"), T("扫描会沿 history_base 检查唯一后继链，不会写入文件。", "The scan follows history_base and never writes files."))));
@@ -431,12 +458,12 @@ internal sealed class MainWindow : Window
                 }
                 content.Add(Panel(stack));
             }
-            if (_historyRecords.Count > 0)
-            {
-                content.Add(Text(T("修复记录与安全撤销", "Repair records and safe rollback"), 16, FontWeights.SemiBold, Ink));
-                foreach (var record in _historyRecords)
-                    content.Add(Panel(Row(TextBlockPair(PreviewTitle(record.Title, record.ThreadId), $"{record.CreatedAt.ToLocalTime():g}\n{record.OldPath} → {record.NewPath}"), Button(T("检查并撤销", "Check & Revert"), false, () => RollbackHistoryAsync(record), _busy))));
-            }
+        }
+        if (_historyRecords.Count > 0)
+        {
+            content.Add(Text(T("修复记录与安全撤销", "Repair records and safe rollback"), 16, FontWeights.SemiBold, Ink));
+            foreach (var record in _historyRecords)
+                content.Add(Panel(Row(TextBlockPair(PreviewTitle(record.Title, record.ThreadId), $"{record.CreatedAt.ToLocalTime():g}\n{record.OldPath} → {record.NewPath}"), Button(T("检查并撤销", "Check & Revert"), false, () => RollbackHistoryAsync(record), _busy))));
         }
         return Page(T("对话诊断与修复", "Chat Diagnosis & Repair"), T("针对原始 JSONL 仍在、但主入口停留旧分支导致后续消息不显示的分页对话。", "For paginated chats whose JSONL exists but the main entrypoint still points to an older branch."), content.ToArray());
     }
@@ -495,11 +522,87 @@ internal sealed class MainWindow : Window
     private UIElement BuildBackups()
     {
         var s = new StackPanel();
-        s.Children.Add(Row(Text(T("本地备份", "Local Backups"), 16, FontWeights.SemiBold, Ink), Button(T("打开备份目录", "Open Folder"), false, () => RepairService.OpenDirectory(RepairService.BackupRoot(_settings.CodexHome)))));
-        var backups = _scan?.Backups ?? [];
-        if (backups.Count == 0) s.Children.Add(Empty("⊞", T("暂无备份", "No backups yet"), T("只有存在实际待修复项并执行“备份并修复”时，应用才会创建备份。", "Backups are created only when repairs are applied.")));
-        foreach (var backup in backups) s.Children.Add(BackupRow(backup));
-        return Page(T("备份", "Backups"), T("查看本地备份并按需恢复。恢复前同样需要退出 Codex。", "View and restore local backups. Codex must be closed before restore."), Panel(s));
+        s.Children.Add(Row(Text(T("本地备份", "Local Backups"), 16, FontWeights.SemiBold, Ink), Button(T("刷新", "Refresh"), false, async () => await RefreshBackupsAsync(), _busy || _loadingBackups), Button(T("打开备份目录", "Open Folder"), false, () => OpenExistingBackupFolder(RepairService.BackupRoot(_settings.CodexHome)))));
+        s.Children.Add(Button(T("打开已删除备份", "Open Deleted Backups"), false, () => OpenExistingBackupFolder(BackupManagementService.DeletedRoot(_settings.CodexHome))));
+        if (_loadingBackups) s.Children.Add(UpdateText(T("正在读取备份…", "Reading backups…"), Muted));
+        foreach (var warning in _backupWarnings) s.Children.Add(UpdateText(warning, Warn));
+        if (!_loadingBackups && _managedBackups.Count == 0) s.Children.Add(Empty("⊞", T("暂无可管理的备份", "No manageable backups"), T("相应备份或修复操作会创建备份；无法识别的目录会显示警告，不允许自动删除。", "Backups are created by backup/repair operations. Unrecognized directories are reported and cannot be deleted automatically.")));
+        foreach (var item in _managedBackups)
+        {
+            var row = new StackPanel();
+            row.Children.Add(UpdateText($"{(item.IsHistory ? T("对话修复备份", "Chat Repair Backup") : T("普通备份", "Ordinary Backup"))} · {item.CreatedAt.ToLocalTime():g}\n{item.Title}\n{item.Directory}", Ink));
+            row.Children.Add(Row(
+                Button(item.IsHistory ? T("前往对话修复", "Open Chat Repair") : T("恢复此备份", "Restore"), false, () =>
+                {
+                    if (item.IsHistory) { _section = UiSection.History; UpdateNav(); TryShowCurrent(false); }
+                    else
+                    {
+                        try
+                        {
+                            var backup = System.Text.Json.JsonSerializer.Deserialize<BackupRecord>(item.RecordJson, JsonOptions.Pretty)
+                                ?? throw new IOException(T("备份记录无效。", "Invalid backup record."));
+                            RestoreAsync(backup);
+                        }
+                        catch (Exception ex) { Notice(T("无法恢复", "Cannot Restore"), ex.Message, Warn); }
+                    }
+                }, _busy),
+                Button(T("删除备份…", "Delete Backup…"), false, () => DeleteBackupAsync(item), _busy || _loadingBackups)));
+            s.Children.Add(Panel(row));
+        }
+        return Page(T("备份", "Backups"), T("删除会移到当前 Codex Home 下的 codex-synced-deleted-backups，不永久擦除；可移回原路径后刷新恢复。恢复前需退出 Codex。", "Deletion moves backups to codex-synced-deleted-backups under the current Codex Home, without erasing them. Move them back to their original paths and refresh to recover. Quit Codex before restore."), Panel(s));
+    }
+
+    private void OpenExistingBackupFolder(string path)
+    {
+        try
+        {
+            if (!Directory.Exists(path)) throw new IOException(T("目录尚不存在；完成相应备份、修复或删除后才会创建。", "This folder does not exist yet; a backup, repair or deletion creates it."));
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(path) { UseShellExecute = true });
+            if (_section == UiSection.History) _historyMessage = T("已打开：", "Opened: ") + path;
+        }
+        catch (Exception ex)
+        {
+            if (_section == UiSection.History) _historyMessage = ex.Message + "\n" + path;
+            Notice(T("未打开目录", "Folder Not Opened"), ex.Message + "\n" + path, Warn);
+        }
+        TryShowCurrent(false);
+    }
+
+    private async Task RefreshBackupsAsync()
+    {
+        if (_loadingBackups) return;
+        _loadingBackups = true;
+        var home = _settings.CodexHome;
+        if (_section == UiSection.Backups) TryShowCurrent(false);
+        try
+        {
+            var inventory = await Task.Run(() => new BackupManagementService().Inventory(home));
+            if (home != _settings.CodexHome) return;
+            _managedBackups = inventory.Items;
+            _backupWarnings = inventory.Warnings;
+        }
+        catch (Exception ex) { _backupWarnings = [ex.Message]; }
+        finally { _loadingBackups = false; if (_section == UiSection.Backups) TryShowCurrent(false); }
+    }
+
+    private async void DeleteBackupAsync(ManagedBackup item)
+    {
+        if (_busy) return;
+        if (System.Windows.MessageBox.Show(this,
+            item.Directory + "\n\n" + T("只移动这份备份到已删除备份目录，不修改当前会话。移走后无法直接恢复或撤销对应修复。需要恢复时，将文件夹移回上述原路径并刷新。继续吗？", "Move only this backup to the deleted-backup directory. Live chats are unchanged. Restore/rollback will be unavailable until you move the folder back to the original path above and refresh. Continue?"),
+            T("确认删除备份", "Confirm Backup Deletion"), MessageBoxButton.OKCancel, MessageBoxImage.Warning) != MessageBoxResult.OK) return;
+        var home = _settings.CodexHome;
+        SetBusy(T("正在移动备份", "Moving Backup"), item.Directory, .5);
+        try
+        {
+            var destination = await Task.Run(() => new BackupManagementService().Delete(item, home));
+            _scan?.Backups.RemoveAll(backup => backup.Path == item.Directory);
+            _historyRecords.RemoveAll(record => record.Directory == item.Directory);
+            _busy = false;
+            await RefreshBackupsAsync();
+            Notice(T("备份已移走，可恢复", "Backup Removed, Recoverable"), destination, Ok);
+        }
+        catch (Exception ex) { _busy = false; TryShowCurrent(false); Notice(T("删除失败", "Deletion Failed"), ex.Message, Warn); }
     }
 
     private UIElement BuildSettings()
@@ -507,9 +610,9 @@ internal sealed class MainWindow : Window
         var s = new StackPanel();
         s.Children.Add(SettingsRow(T("界面语言", "Language"), LanguageSwitch()));
         s.Children.Add(Divider());
-        s.Children.Add(PathRow("Codex Home", _settings.CodexHome, p => { _settings.CodexHome = p; _ = ScanAsync(); }));
+        s.Children.Add(PathRow("Codex Home", _settings.CodexHome, p => { _settings.CodexHome = p; ResetHistorySelection(); _ = ScanAsync(); }));
         s.Children.Add(Divider());
-        s.Children.Add(PathRow("SQLite Home", _settings.SqliteHome ?? _settings.CodexHome, p => { _settings.SqliteHome = p; _ = ScanAsync(); }));
+        s.Children.Add(PathRow("SQLite Home", _settings.SqliteHome ?? _settings.CodexHome, p => { _settings.SqliteHome = p; ResetHistorySelection(); _ = ScanAsync(); }));
         s.Children.Add(Divider());
         s.Children.Add(SettingsRow(T("默认备份模式", "Default Backup"), ModeSwitch()));
         s.Children.Add(Divider());
@@ -622,20 +725,38 @@ internal sealed class MainWindow : Window
 
     private async void ScanHistoryAsync()
     {
+        if (_busy) return;
+        _historyScanning = true;
+        _historyScan = null;
+        _historyMessage = null;
+        var captured = SnapshotSettings();
         SetBusy(T("扫描对话入口", "Scanning chat entrypoints"), T("沿 history_base 检查唯一后继链、序号和字节边界。", "Following history_base and checking unique lineage, ordinals, and byte boundaries."), .36);
         try
         {
-            _historyScan = await Task.Run(() => _historyService.Scan(SnapshotSettings()));
-            _historyRecords = await Task.Run(() => _historyService.Records(SnapshotSettings()));
+            var result = await Task.Run(() => _historyService.Scan(captured));
+            if (captured.CodexHome != _settings.CodexHome || captured.SqliteHome != _settings.SqliteHome || captured.HistoryDatabase != _settings.HistoryDatabase)
+                throw new InvalidOperationException(T("目录或状态库选择已变化，请重新扫描。", "Directories or selected database changed; scan again."));
+            _historyScan = result;
+            _historyMessage = T($"扫描完成：检查了 {result.Diagnoses.Count} 个分页对话，{result.Diagnoses.Count(item => item.CanRepair)} 个入口可修复。", $"Scan complete: {result.Diagnoses.Count} paginated chats checked; {result.Diagnoses.Count(item => item.CanRepair)} entrypoints can be repaired.");
             _busy = false;
-            Show(CurrentView(), true);
         }
         catch (Exception ex)
         {
             _busy = false;
-            TryShowCurrent(true);
+            _historyMessage = ex.Message;
             Notice(T("对话扫描失败", "Chat scan failed"), ex.Message, Warn);
         }
+        finally { _historyScanning = false; TryShowCurrent(true); }
+    }
+
+    private void ResetHistorySelection()
+    {
+        _settings.HistoryDatabase = null;
+        _historyScan = null;
+        _historyMessage = null;
+        _historyRecords = [];
+        _managedBackups = [];
+        _backupWarnings = [];
     }
 
     private async void RepairHistoryAsync(HistoryDiagnosis diagnosis)
@@ -705,6 +826,7 @@ internal sealed class MainWindow : Window
     {
         CodexHome = _settings.CodexHome,
         SqliteHome = _settings.SqliteHome,
+        HistoryDatabase = _settings.HistoryDatabase,
         DefaultBackupMode = _settings.DefaultBackupMode,
         LightweightLimit = _settings.LightweightLimit,
         FullLimit = _settings.FullLimit,

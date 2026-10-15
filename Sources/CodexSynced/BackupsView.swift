@@ -3,13 +3,14 @@ import SwiftUI
 
 struct BackupsView: View {
     @EnvironmentObject private var viewModel: AppViewModel
+    @State private var deleting: ManagedBackup?
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
                 HeaderView(
                     title: viewModel.l10n.text("备份", "Backups"),
-                    subtitle: viewModel.l10n.text("查看本地备份并按需恢复。恢复前同样需要退出 Codex。", "View and restore local backups. Codex must be closed before restore.")
+                    subtitle: viewModel.l10n.text("普通备份和对话修复备份可逐条删除到废纸篓；恢复或撤销前需退出 Codex。", "Move individual ordinary or chat-repair backups to Trash. Quit Codex before restore or rollback.")
                 )
 
                 SoftPanel {
@@ -18,26 +19,48 @@ struct BackupsView: View {
                             Text(viewModel.l10n.text("本地备份", "Local Backups"))
                                 .font(.system(size: 16, weight: .semibold))
                             Spacer()
+                            SecondaryButton(title: viewModel.l10n.text(viewModel.loadingBackups ? "读取中…" : "刷新", viewModel.loadingBackups ? "Loading…" : "Refresh"), systemImage: "arrow.clockwise") {
+                                Task { await viewModel.refreshBackups() }
+                            }.disabled(viewModel.loadingBackups || viewModel.isBusy)
                             SecondaryButton(title: viewModel.l10n.text("打开备份目录", "Open Folder"), systemImage: "folder") {
                                 viewModel.openBackupDirectory()
                             }
                         }
 
-                        if let backups = viewModel.scanResult?.backups, !backups.isEmpty {
-                            ForEach(backups) { backup in
-                                BackupRow(backup: backup, compact: false)
-                                    .transition(.move(edge: .bottom).combined(with: .opacity))
-                                    .overlay(alignment: .trailing) {
-                                        SecondaryButton(
-                                            title: viewModel.l10n.text("恢复此备份", "Restore"),
-                                            systemImage: "arrow.counterclockwise"
-                                        ) {
-                                            viewModel.selectedBackupForRestore = backup
-                                            viewModel.showingRestoreConfirmation = true
-                                        }
-                                        .padding(.trailing, 8)
+                        ForEach(viewModel.backupWarnings, id: \.self) { warning in
+                            Text(warning).font(.caption).foregroundStyle(.orange).textSelection(.enabled)
+                        }
+                        if viewModel.loadingBackups && viewModel.managedBackups.isEmpty {
+                            ProgressView()
+                        } else if !viewModel.managedBackups.isEmpty {
+                            ForEach(viewModel.managedBackups) { item in
+                                VStack(alignment: .leading, spacing: 8) {
+                                    if let backup = item.backup {
+                                        BackupRow(backup: backup, compact: false)
+                                    } else {
+                                        Text(viewModel.l10n.text("对话修复备份", "Chat Repair Backup")).font(.headline)
+                                        Text(item.title).lineLimit(2)
+                                        Text(item.createdAt.formatted()).font(.caption)
                                     }
-                                    .animation(AppMotion.smooth, value: viewModel.showingRestoreConfirmation)
+                                    Text(item.directory.path).font(.caption.monospaced()).foregroundStyle(DS.muted).textSelection(.enabled)
+                                    HStack {
+                                        if let backup = item.backup {
+                                            SecondaryButton(title: viewModel.l10n.text("恢复此备份", "Restore"), systemImage: "arrow.counterclockwise") {
+                                                viewModel.selectedBackupForRestore = backup
+                                                viewModel.showingRestoreConfirmation = true
+                                            }.disabled(viewModel.isBusy)
+                                        } else {
+                                            Button(viewModel.l10n.text("前往对话修复查看撤销", "View Rollback in Chat Repair")) {
+                                                viewModel.selectedSection = .history
+                                            }
+                                        }
+                                        Spacer()
+                                        Button(role: .destructive) { deleting = item } label: {
+                                            Label(viewModel.l10n.text("删除备份…", "Delete Backup…"), systemImage: "trash")
+                                        }.disabled(viewModel.isBusy || viewModel.loadingBackups)
+                                    }
+                                }.padding(12)
+                                Divider()
                             }
                         } else {
                             HStack {
@@ -60,6 +83,18 @@ struct BackupsView: View {
                 }
             }
             .padding(28)
+        }
+        .task(id: viewModel.settings.codexHome) { await viewModel.refreshBackups() }
+        .alert(viewModel.l10n.text("将这份备份移到废纸篓？", "Move this backup to Trash?"), isPresented: Binding(
+            get: { deleting != nil }, set: { if !$0 { deleting = nil } }
+        )) {
+            Button(viewModel.l10n.text("取消", "Cancel"), role: .cancel) { deleting = nil }
+            Button(viewModel.l10n.text("移到废纸篓", "Move to Trash"), role: .destructive) {
+                if let item = deleting { Task { await viewModel.deleteBackup(item) } }
+                deleting = nil
+            }.disabled(viewModel.isBusy)
+        } message: {
+            Text((deleting.map { "\($0.createdAt.formatted())\n\($0.directory.path)\n\n" } ?? "") + viewModel.l10n.text("只移走这一份备份，不修改当前会话。移走后不能直接恢复或撤销对应修复；可在 Finder 废纸篓中放回原位置后刷新。清空废纸篓后将无法恢复。", "Only this backup is moved; live chats are not modified. Restore/rollback will be unavailable until you put it back from Finder's Trash and refresh. Emptying Trash makes deletion permanent."))
         }
     }
 }

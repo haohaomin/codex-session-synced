@@ -44,7 +44,7 @@ internal sealed class HistoryEntrypointService
     private sealed record Manifest(int Version, HistoryRepairRecord Record, string Database, string CodexHome, Row Before, Row After, List<HistoryFile> Files);
     private static readonly Regex RolloutName = new("^rollout-.+-(?<logical>[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})(?:_(?<physical>[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}))?\\.jsonl$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
-    public HistoryScanResult Scan(AppSettings settings)
+    public List<string> DatabaseCandidates(AppSettings settings)
     {
         var codexHome = Path.GetFullPath(settings.CodexHome);
         var configuredSQLite = settings.SqliteHome;
@@ -66,9 +66,32 @@ internal sealed class HistoryEntrypointService
                 .GroupBy(Path.GetFullPath, StringComparer.OrdinalIgnoreCase)
                 .Select(group => group.First())
                 .ToList();
-        if (databases.Count != 1)
-            throw new InvalidOperationException("对话修复要求明确选择仅包含一个 state_*.sqlite 的 SQLite 目录。");
-        using var db = new SqliteDatabase(databases[0], true);
+        return databases.Select(Path.GetFullPath).OrderBy(path => path, StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    public HistoryScanResult Scan(AppSettings settings)
+    {
+        var codexHome = Path.GetFullPath(settings.CodexHome);
+        var databases = DatabaseCandidates(settings);
+        string database;
+        if (!string.IsNullOrWhiteSpace(settings.HistoryDatabase))
+        {
+            database = Path.GetFullPath(settings.HistoryDatabase);
+            if (!databases.Any(path => SamePath(path, database)))
+                throw new InvalidOperationException("选中的状态库已不在当前目录，请重新选择。Selected database is no longer available; select it again.");
+        }
+        else
+        {
+            if (databases.Count != 1)
+                throw new InvalidOperationException(databases.Count == 0
+                    ? "未找到状态库，请检查 Codex Home / SQLite Home。No state database found; check directories."
+                    : "发现多个状态库，请在本页选择文件后扫描。Multiple databases found; select a file on this page.");
+            database = databases[0];
+        }
+        if ((File.GetAttributes(database) & (FileAttributes.ReparsePoint | FileAttributes.Directory)) != 0 ||
+            (File.GetAttributes(Path.GetDirectoryName(database)!) & FileAttributes.ReparsePoint) != 0)
+            throw new InvalidOperationException("状态库不能是链接。Linked state databases are not allowed.");
+        using var db = new SqliteDatabase(database, true);
         var rows = db.QueryHistoryEntrypointRows().Where(row => row.HistoryMode.Equals("paginated", StringComparison.OrdinalIgnoreCase)).Select(row => new Row(row.Id, row.RolloutPath, row.Title, row.HistoryMode)).ToList();
         var warnings = new List<string>();
         var blockedDirectories = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -100,7 +123,7 @@ internal sealed class HistoryEntrypointService
                 diagnoses.Add(new(row.Id, row.Title, row.Path, null, error.Message, 0, []));
             }
         }
-        return new(databases[0], codexHome, diagnoses, warnings);
+        return new(database, codexHome, diagnoses, warnings);
     }
 
     public HistoryRepairRecord Repair(HistoryScanResult scan, HistoryDiagnosis diagnosis, AppSettings settings, bool ignoreCodexRunning = false)
@@ -191,7 +214,7 @@ internal sealed class HistoryEntrypointService
             ?? throw new InvalidOperationException("修复记录损坏。");
         var scan = Scan(settings);
         var current = scan.Diagnoses.FirstOrDefault(item => item.Id.Equals(record.ThreadId, StringComparison.OrdinalIgnoreCase));
-        if (current is null || !SamePath(current.CurrentPath, manifest.After.Path) || !current.Files.SequenceEqual(manifest.Files))
+        if (!SamePath(scan.Database, manifest.Database) || !SamePath(scan.CodexHome, manifest.CodexHome) || current is null || !SamePath(current.CurrentPath, manifest.After.Path) || !current.Files.SequenceEqual(manifest.Files))
             throw new InvalidOperationException("目标记录或分支文件已变化，拒绝覆盖新消息。");
         using var db = new SqliteDatabase(manifest.Database, false);
         db.ChangeEntrypoint(record.ThreadId, manifest.After.Path, manifest.Before.Path);

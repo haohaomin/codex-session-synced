@@ -71,6 +71,7 @@ internal sealed class AppSettings
     public bool OpenCodexAfterRepair { get; set; } = true;
     public bool AlignProvidersForVisibility { get; set; } = true;
     public bool CheckForUpdatesOnLaunch { get; set; }
+    public string? HistoryDatabase { get; set; }
 
     public static string SettingsPath =>
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Codex Synced", "settings.json");
@@ -2353,6 +2354,20 @@ internal static class SelfTest
             historyService.Rollback(historyRecord, new AppSettings { CodexHome = historyRoot, OpenCodexAfterRepair = false }, true);
             var rolledBackHistoryScan = historyService.Scan(new AppSettings { CodexHome = historyRoot, OpenCodexAfterRepair = false });
             Assert(rolledBackHistoryScan.Diagnoses[0].ProposedPath == historyChildPath && rolledBackHistoryScan.Diagnoses[0].CurrentPath == historyRootPath, "Chat entrypoint rollback did not restore the original path.");
+
+            var alternateDatabase = Path.Combine(historyRoot, "state_6.sqlite");
+            File.Copy(rolledBackHistoryScan.Database, alternateDatabase);
+            var selectionSettings = new AppSettings { CodexHome = historyRoot, OpenCodexAfterRepair = false };
+            Assert(historyService.DatabaseCandidates(selectionSettings).Count == 2, "Database candidates should expose ambiguity.");
+            var ambiguousRejected = false;
+            try { historyService.Scan(selectionSettings); } catch (InvalidOperationException) { ambiguousRejected = true; }
+            Assert(ambiguousRejected, "Ambiguous history scan should fail closed.");
+            selectionSettings.HistoryDatabase = rolledBackHistoryScan.Database;
+            Assert(historyService.Scan(selectionSettings).Database == rolledBackHistoryScan.Database, "Explicit history database selection was not honored.");
+            selectionSettings.HistoryDatabase = Path.Combine(historyRoot, "missing.sqlite");
+            var missingSelectionRejected = false;
+            try { historyService.Scan(selectionSettings); } catch (InvalidOperationException) { missingSelectionRejected = true; }
+            Assert(missingSelectionRejected, "Stale database selection must be rejected.");
 
             var migratedRoot = Path.Combine(root, "migrated-sqlite-home");
             Directory.CreateDirectory(migratedRoot);
